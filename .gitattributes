@@ -1,0 +1,11 @@
+# Built under WSL: sources and scripts are always LF, so editing from the
+# Windows side cannot introduce CRLF and break the bash scripts.
+* text=auto eol=lf
+*.sh   text eol=lf
+*.cu   text eol=lf
+*.h    text eol=lf
+*.py   text eol=lf
+*.md   text eol=lf
+Makefile text eol=lf
+*.csv  text eol=lf
+*.ncu-rep binary
