@@ -71,6 +71,8 @@ sweep: build
 	  --csv $(RESULTS)/gemm_sweep.csv
 
 # Collect an ncu report for one rung: make profile K=k1
+# The binary .ncu-rep stays local (tens of MB); its details page is exported
+# as CSV next to it and that text export is what gets committed.
 # Some managed GPUs deny counter access to users (ERR_NVGPUCTRPERM); that is a
 # host policy, not a build problem, and is reported as such.
 profile: build
@@ -87,6 +89,10 @@ profile: build
 	  echo "this device (ERR_NVGPUCTRPERM). Collect counters on a device where they"; \
 	  echo "are enabled; timing numbers from 'make bench' are unaffected."; \
 	  rc=1; \
+	fi; \
+	if [[ -f $$out.ncu-rep ]]; then \
+	  $(NCU) -i $$out.ncu-rep --csv --page details > $$out.details.csv && \
+	  echo "profile: details exported to $$out.details.csv"; \
 	fi; \
 	rm -f $$log; exit $$rc
 
