@@ -25,6 +25,7 @@ struct GpuSample {
   int temp_c = -1;
   double power_w = -1.0;  // -1 when not reported
   std::string reasons;    // clocks_event_reasons.active, hex bitmask
+  double power_limit_w = -1.0;  // enforced power limit, -1 when not reported
   // Cumulative microseconds each slowdown reason has been active since the
   // driver loaded. Only the difference between two samples means anything.
   long long us_sw_power_cap = -1;
@@ -73,7 +74,8 @@ inline GpuSample sample_gpu(const std::string& selector) {
       "clocks_event_reasons_counters.sw_power_cap,"
       "clocks_event_reasons_counters.sw_thermal_slowdown,"
       "clocks_event_reasons_counters.hw_thermal_slowdown,"
-      "clocks_event_reasons_counters.hw_power_brake_slowdown "
+      "clocks_event_reasons_counters.hw_power_brake_slowdown,"
+      "enforced.power.limit "
       "--format=csv,noheader,nounits";
   if (!selector.empty()) cmd += " --id=" + selector;
   cmd += " 2>/dev/null";
@@ -98,7 +100,7 @@ inline GpuSample sample_gpu(const std::string& selector) {
     }
   }
   f.push_back(trim(cur));
-  if (f.size() != 9) return s;
+  if (f.size() != 10) return s;
 
   s.sm_mhz = static_cast<int>(to_ll(f[0]));
   s.mem_mhz = static_cast<int>(to_ll(f[1]));
@@ -109,6 +111,7 @@ inline GpuSample sample_gpu(const std::string& selector) {
   s.us_sw_thermal = to_ll(f[6]);
   s.us_hw_thermal = to_ll(f[7]);
   s.us_hw_power_brake = to_ll(f[8]);
+  s.power_limit_w = to_d(f[9]);
   s.valid = s.sm_mhz >= 0;
   return s;
 }

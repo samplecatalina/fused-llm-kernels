@@ -37,8 +37,12 @@ SHAPE      ?= 4096x4096x4096
 REPS       ?= 100
 # Minimum warmup; the runner keeps going until the SM clock settles.
 WARMUP_S   ?= 30
+# Minimum enforced GPU power limit (W) a benchmark may run under; 0 disables
+# the check. The mobile 4060 loses most of its power budget when the host
+# leaves its high-performance power plan or runs on a weaker adapter.
+MIN_POWER_LIMIT_W ?= $(if $(filter rtx4060-laptop,$(DEVICE)),75,0)
 BENCH_FLAGS = --device-tag $(DEVICE) --log-clocks --warmup-seconds $(WARMUP_S) \
-              --reps $(REPS)
+              --reps $(REPS) --min-power-limit $(MIN_POWER_LIMIT_W)
 
 .PHONY: all build test bench sweep profile format clean
 

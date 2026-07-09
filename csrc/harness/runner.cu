@@ -28,6 +28,7 @@ struct Options {
   double warmup_max_seconds = 0.0;  // 0 means 4x warmup_seconds
   int warmup_iters = 0;             // only used when warmup_seconds is 0
   bool log_clocks = false;
+  double min_power_limit_w = 0.0;   // 0 disables the power-limit check
   float alpha = 1.0f;
   float beta = 0.0f;
   bool check = true;
@@ -59,7 +60,7 @@ const char* const kCsvHeader =
     "start_sample_age_s,"
     "end_sm_mhz,end_mem_mhz,end_temp_c,end_power_w,end_reasons,"
     "timed_s,sw_power_cap_ms,sw_thermal_ms,hw_thermal_ms,hw_power_brake_ms,"
-    "tag";
+    "tag,pre_power_limit_w,start_power_limit_w,end_power_limit_w";
 
 struct Warmup {
   const char* mode = "none";     // seconds | iters | none
@@ -197,6 +198,8 @@ void usage() {
       "                             --warmup-seconds is 0 (profiling runs)\n"
       "  --log-clocks               record clock / power / clock-event state\n"
       "  --device-tag <tag>         device label stored in every CSV row\n"
+      "  --min-power-limit W        refuse to benchmark below this enforced GPU\n"
+      "                             power limit; default 0 (no check)\n"
       "  --alpha F --beta F         default 1.0 / 0.0\n"
       "  --no-check                 skip the correctness check\n"
       "  --no-bench                 correctness only\n"
@@ -339,6 +342,8 @@ int main(int argc, char** argv) {
       o.warmup_iters = std::atoi(next("--warmup"));
     } else if (a == "--log-clocks") {
       o.log_clocks = true;
+    } else if (a == "--min-power-limit") {
+      o.min_power_limit_w = std::atof(next("--min-power-limit"));
     } else if (a == "--device-tag") {
       o.device_tag = next("--device-tag");
     } else if (a == "--alpha") {
@@ -422,6 +427,29 @@ int main(int argc, char** argv) {
   }
   std::printf("\n");
 
+  // A GPU's enforced power limit is not a constant: a laptop part drops to a
+  // fraction of it when the host leaves its high-performance power plan, and
+  // every number measured afterwards describes a different machine. Checked
+  // before any work starts, and again after each timed region.
+  if (o.bench && o.min_power_limit_w > 0.0) {
+    const GpuSample s = sample_gpu(gpu_id);
+    if (!s.valid || s.power_limit_w < 0.0) {
+      std::fprintf(stderr, "cannot read the enforced power limit; refusing to "
+                           "benchmark with --min-power-limit set\n");
+      return 1;
+    }
+    if (s.power_limit_w < o.min_power_limit_w) {
+      std::fprintf(stderr,
+                   "enforced power limit %.1f W is below the required %.1f W: "
+                   "benchmark conditions not met (check the host power plan "
+                   "and power adapter)\n",
+                   s.power_limit_w, o.min_power_limit_w);
+      return 1;
+    }
+    std::printf("power limit: %.1f W (required >= %.1f W)\n\n",
+                s.power_limit_w, o.min_power_limit_w);
+  }
+
   FILE* csv = nullptr;
   if (!o.csv.empty() && o.bench) {
     std::string first_line;
@@ -498,12 +526,21 @@ int main(int argc, char** argv) {
       Warmup w;
       GpuSample pre, start, end;
       if (o.bench) {
-        if (o.log_clocks) pre = sample_gpu(gpu_id);
+        if (o.log_clocks || o.min_power_limit_w > 0.0) pre = sample_gpu(gpu_id);
         w = warm_up(ke->fn, s, o, dA, dB, dC, gpu_id);
         start = w.last;
         if (o.log_clocks && !start.valid) start = sample_gpu(gpu_id);
         t = time_kernel(ke->fn, s, o, dA, dB, dC);
-        if (o.log_clocks) end = sample_gpu(gpu_id);
+        if (o.log_clocks || o.min_power_limit_w > 0.0) end = sample_gpu(gpu_id);
+      }
+      const bool power_ok =
+          !o.bench || o.min_power_limit_w <= 0.0 ||
+          (end.valid && end.power_limit_w >= o.min_power_limit_w);
+      if (!power_ok) {
+        std::printf("       ! enforced power limit dropped to %.1f W during "
+                    "the run (required >= %.1f W)\n",
+                    end.power_limit_w, o.min_power_limit_w);
+        failures++;
       }
       const double g_med = o.bench ? gflops_of(s, t.median_ms) : 0.0;
       const double g_best = o.bench ? gflops_of(s, t.min_ms) : 0.0;
@@ -546,7 +583,9 @@ int main(int argc, char** argv) {
 
       if (csv && !ok)
         std::printf("       row not written: correctness check failed\n");
-      if (csv && ok) {
+      if (csv && ok && !power_ok)
+        std::printf("       row not written: power limit below the minimum\n");
+      if (csv && ok && power_ok) {
         const double age = (start.valid && t.start_s > 0.0)
                                ? t.start_s - start.t_s
                                : -1.0;
@@ -584,7 +623,10 @@ int main(int argc, char** argv) {
         row += fmt_num(active_ms(start.us_hw_power_brake,
                                  end.us_hw_power_brake),
                        "%.1f") + ",";
-        row += csv_safe(o.tag);
+        row += csv_safe(o.tag) + ",";
+        row += fmt_num(pre.power_limit_w, "%.2f") + "," +
+               fmt_num(start.power_limit_w, "%.2f") + "," +
+               fmt_num(end.power_limit_w, "%.2f");
         std::fprintf(csv, "%s\n", row.c_str());
         std::fflush(csv);
       }
