@@ -6,6 +6,7 @@
 const KernelEntry kKernels[] = {
     {"k0", "cuBLAS SGEMM (baseline)", sgemm_k0_cublas},
     {"k1", "naive: one thread per C element", sgemm_k1_naive},
+    {"k2", "coalesced access: threadIdx.x selects the column", sgemm_k2_coalesced},
 };
 const int kNumKernels = sizeof(kKernels) / sizeof(kKernels[0]);
 
