@@ -22,6 +22,8 @@ void sgemm_k3_shared(int M, int N, int K, float alpha, const float* A,
                      const float* B, float beta, float* C);
 void sgemm_k4_tiling1d(int M, int N, int K, float alpha, const float* A,
                        const float* B, float beta, float* C);
+void sgemm_k5_tiling2d(int M, int N, int K, float alpha, const float* A,
+                       const float* B, float beta, float* C);
 
 extern const KernelEntry kKernels[];
 extern const int kNumKernels;
