@@ -3,4 +3,5 @@ profiling/reports/**/*.ncu-rep
 __pycache__/
 *.pyc
 .venv/
-.dev/.vscode/
+.dev/
+.vscode/
