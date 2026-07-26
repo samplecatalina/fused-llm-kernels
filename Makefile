@@ -44,7 +44,7 @@ MIN_POWER_LIMIT_W ?= $(if $(filter rtx4060-laptop,$(DEVICE)),75,0)
 BENCH_FLAGS = --device-tag $(DEVICE) --log-clocks --warmup-seconds $(WARMUP_S) \
               --reps $(REPS) --min-power-limit $(MIN_POWER_LIMIT_W)
 
-.PHONY: all build test bench sweep profile format clean
+.PHONY: all build test bench sweep tune profile format clean
 
 all: build
 
@@ -67,6 +67,13 @@ bench: build
 	@mkdir -p $(RESULTS)
 	$(BIN) --kernel $(KERNELS) --shape $(SHAPE) $(BENCH_FLAGS) \
 	  --csv $(RESULTS)/gemm_4096.csv
+
+# Parameter search over the tiling configurations of one rung
+TUNE_KERNELS ?= k7,k7c1,k7c2,k7c3,k7c4,k7c5,k7c6,k7c7,k7c8
+tune: build
+	@mkdir -p $(RESULTS)
+	$(BIN) --kernel k0,$(TUNE_KERNELS) --shape $(SHAPE) $(BENCH_FLAGS) \
+	  --csv $(RESULTS)/tuning_k7.csv
 
 # 512..8192 sweep: shows launch overhead at the small end and L2 effects
 sweep: build

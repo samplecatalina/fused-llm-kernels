@@ -27,6 +27,26 @@ void sgemm_k5_tiling2d(int M, int N, int K, float alpha, const float* A,
 void sgemm_k6_vectorized(int M, int N, int K, float alpha, const float* A,
                          const float* B, float beta, float* C);
 
+// K7 plus the configurations used by the parameter search.
+void sgemm_k7_warptile(int M, int N, int K, float alpha, const float* A,
+                  const float* B, float beta, float* C);
+void sgemm_k7_c1(int M, int N, int K, float alpha, const float* A,
+                  const float* B, float beta, float* C);
+void sgemm_k7_c2(int M, int N, int K, float alpha, const float* A,
+                  const float* B, float beta, float* C);
+void sgemm_k7_c3(int M, int N, int K, float alpha, const float* A,
+                  const float* B, float beta, float* C);
+void sgemm_k7_c4(int M, int N, int K, float alpha, const float* A,
+                  const float* B, float beta, float* C);
+void sgemm_k7_c5(int M, int N, int K, float alpha, const float* A,
+                  const float* B, float beta, float* C);
+void sgemm_k7_c6(int M, int N, int K, float alpha, const float* A,
+                  const float* B, float beta, float* C);
+void sgemm_k7_c7(int M, int N, int K, float alpha, const float* A,
+                  const float* B, float beta, float* C);
+void sgemm_k7_c8(int M, int N, int K, float alpha, const float* A,
+                  const float* B, float beta, float* C);
+
 extern const KernelEntry kKernels[];
 extern const int kNumKernels;
 const KernelEntry* find_kernel(const char* name);
