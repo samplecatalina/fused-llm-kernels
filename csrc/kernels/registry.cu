@@ -10,6 +10,7 @@ const KernelEntry kKernels[] = {
     {"k3", "shared-memory tiling, 32x32x32 tiles", sgemm_k3_shared},
     {"k4", "1D thread tiling, 8 results per thread", sgemm_k4_tiling1d},
     {"k5", "2D thread tiling, 8x8 register block, 128x128x16 tiles", sgemm_k5_tiling2d},
+    {"k6", "float4 vectorized loads, transposed A tile", sgemm_k6_vectorized},
 };
 const int kNumKernels = sizeof(kKernels) / sizeof(kKernels[0]);
 
