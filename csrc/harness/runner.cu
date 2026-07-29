@@ -29,6 +29,10 @@ struct Options {
   int warmup_iters = 0;             // only used when warmup_seconds is 0
   bool log_clocks = false;
   double min_power_limit_w = 0.0;   // 0 disables the power-limit check
+  bool allow_dirty = false;         // write CSV rows from uncommitted code
+  double k0_baseline = 0.0;         // device baseline for k0, GFLOP/s; 0 = none
+  double k0_band_pct = 0.0;         // accepted deviation from it, percent
+  Shape baseline_shape = {4096, 4096, 4096};
   float alpha = 1.0f;
   float beta = 0.0f;
   bool check = true;
@@ -60,7 +64,8 @@ const char* const kCsvHeader =
     "start_sample_age_s,"
     "end_sm_mhz,end_mem_mhz,end_temp_c,end_power_w,end_reasons,"
     "timed_s,sw_power_cap_ms,sw_thermal_ms,hw_thermal_ms,hw_power_brake_ms,"
-    "tag,pre_power_limit_w,start_power_limit_w,end_power_limit_w";
+    "tag,pre_power_limit_w,start_power_limit_w,end_power_limit_w,"
+    "kernel_desc,baseline_check";
 
 struct Warmup {
   const char* mode = "none";     // seconds | iters | none
@@ -198,6 +203,11 @@ void usage() {
       "                             --warmup-seconds is 0 (profiling runs)\n"
       "  --log-clocks               record clock / power / clock-event state\n"
       "  --device-tag <tag>         device label stored in every CSV row\n"
+      "  --allow-dirty              allow CSV rows from uncommitted code (the\n"
+      "                             row is still marked -dirty)\n"
+      "  --k0-baseline G            device baseline for k0 in GFLOP/s at the\n"
+      "                             baseline shape (4096^3); 0 disables\n"
+      "  --k0-band P                accepted deviation from it, in percent\n"
       "  --min-power-limit W        refuse to benchmark below this enforced GPU\n"
       "                             power limit; default 0 (no check)\n"
       "  --alpha F --beta F         default 1.0 / 0.0\n"
@@ -342,6 +352,12 @@ int main(int argc, char** argv) {
       o.warmup_iters = std::atoi(next("--warmup"));
     } else if (a == "--log-clocks") {
       o.log_clocks = true;
+    } else if (a == "--allow-dirty") {
+      o.allow_dirty = true;
+    } else if (a == "--k0-baseline") {
+      o.k0_baseline = std::atof(next("--k0-baseline"));
+    } else if (a == "--k0-band") {
+      o.k0_band_pct = std::atof(next("--k0-band"));
     } else if (a == "--min-power-limit") {
       o.min_power_limit_w = std::atof(next("--min-power-limit"));
     } else if (a == "--device-tag") {
@@ -415,6 +431,18 @@ int main(int argc, char** argv) {
   std::printf("device tag: %s  source: %s\n",
               o.device_tag.empty() ? "(none)" : o.device_tag.c_str(),
               rev.c_str());
+  // A row is only traceable if the code that produced it exists in history.
+  const bool dirty =
+      rev == "unknown" ||
+      (rev.size() > 6 && rev.compare(rev.size() - 6, 6, "-dirty") == 0);
+  if (!o.csv.empty() && o.bench && dirty && !o.allow_dirty) {
+    std::fprintf(stderr,
+                 "refusing to write CSV rows from uncommitted code (source "
+                 "%s): commit first, or pass --allow-dirty for an "
+                 "exploratory run\n",
+                 rev.c_str());
+    return 1;
+  }
   if (o.bench) {
     if (o.warmup_seconds > 0.0)
       std::printf("bench: warmup >= %.0f s until SM clock settles (cap %.0f s)",
@@ -502,6 +530,14 @@ int main(int argc, char** argv) {
                 "fro_rel");
 
     double cublas_gflops = 0.0;
+    // Whether this run's k0 sits inside the device's run-to-run band. Out of
+    // band means the machine is in a different state (thermal, power) from
+    // the one the baseline was taken in: ratios inside this run still hold,
+    // absolute numbers do not compare across runs.
+    const bool baseline_applies =
+        o.k0_baseline > 0.0 && s.M == o.baseline_shape.M &&
+        s.N == o.baseline_shape.N && s.K == o.baseline_shape.K;
+    const char* baseline_state = baseline_applies ? "no-k0-yet" : "n/a";
     for (const std::string& kname : o.kernels) {
       const KernelEntry* ke = find_kernel(kname.c_str());
       if (!ke) {
@@ -544,7 +580,20 @@ int main(int argc, char** argv) {
       }
       const double g_med = o.bench ? gflops_of(s, t.median_ms) : 0.0;
       const double g_best = o.bench ? gflops_of(s, t.min_ms) : 0.0;
-      if (kname == "k0") cublas_gflops = g_med;
+      if (kname == "k0") {
+        cublas_gflops = g_med;
+        if (baseline_applies && o.bench) {
+          const double dev_pct = 100.0 * (g_med / o.k0_baseline - 1.0);
+          const bool in_band = std::fabs(dev_pct) <= o.k0_band_pct;
+          baseline_state = in_band ? "in-band" : "out-of-band";
+          if (!in_band)
+            std::printf("       ! k0 is %+.2f%% from the device baseline "
+                        "%.1f (band +-%.1f%%): absolute numbers from this run "
+                        "do not compare across runs; ratios within it still "
+                        "do\n",
+                        dev_pct, o.k0_baseline, o.k0_band_pct);
+        }
+      }
       const double pct =
           (cublas_gflops > 0.0) ? 100.0 * g_med / cublas_gflops : 0.0;
       const double spread =
@@ -626,7 +675,9 @@ int main(int argc, char** argv) {
         row += csv_safe(o.tag) + ",";
         row += fmt_num(pre.power_limit_w, "%.2f") + "," +
                fmt_num(start.power_limit_w, "%.2f") + "," +
-               fmt_num(end.power_limit_w, "%.2f");
+               fmt_num(end.power_limit_w, "%.2f") + ",";
+        row += csv_safe(ke->desc) + ",";
+        row += baseline_state;
         std::fprintf(csv, "%s\n", row.c_str());
         std::fflush(csv);
       }

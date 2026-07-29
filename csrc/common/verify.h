@@ -11,6 +11,17 @@
 // Neither is sufficient alone: max_rel is inflated by elements near zero, and
 // fro_rel averages away a handful of badly wrong elements - which is exactly
 // what a boundary bug produces.
+//
+// max_rel divides by |ref| plus a floor of 5% of the RMS of ref. A fixed
+// absolute floor does not work: two correct implementations that sum in a
+// different order differ by floating-point rounding of up to about 2e-6 of
+// the RMS, and on an element close to zero that rounding reads as a large
+// relative error (at 1024^3 a fixed 1e-5 floor rejected every kernel here).
+// Measured on 4096^2-element synthetic matrices, the 5% floor keeps rounding
+// noise 5x under the tolerance at every size, and a floor of 1% did not
+// (1.1x). A single wrong A*B term (about 0.25 for these inputs) is still
+// rejected: by orders of magnitude on small elements, and by 1.5x even on the
+// single largest element of an 8192^3 result, where the floor plays no part.
 struct VerifyResult {
   double max_rel = 0.0;
   double fro_rel = 0.0;
@@ -23,16 +34,22 @@ struct VerifyResult {
   }
 };
 
+constexpr double kMaxRelFloorOfRms = 5e-2;
+
 inline VerifyResult verify(const std::vector<float>& ref,
                            const std::vector<float>& got) {
   VerifyResult r;
-  double num = 0.0, den = 0.0;
+  double den = 0.0;
+  for (float a : ref) den += static_cast<double>(a) * a;
+  const double rms = ref.empty() ? 0.0 : std::sqrt(den / ref.size());
+  const double floor = rms > 0.0 ? kMaxRelFloorOfRms * rms : 1e-5;
+
+  double num = 0.0;
   for (size_t i = 0; i < ref.size(); ++i) {
     const double a = ref[i], b = got[i];
     const double d = a - b;
     num += d * d;
-    den += a * a;
-    const double rel = std::fabs(d) / (std::fabs(a) + 1e-5);
+    const double rel = std::fabs(d) / (std::fabs(a) + floor);
     if (!(rel <= r.max_rel)) {  // written this way so NaN also trips it
       r.max_rel = rel;
       r.worst_index = i;

@@ -41,10 +41,16 @@ WARMUP_S   ?= 30
 # the check. The mobile 4060 loses most of its power budget when the host
 # leaves its high-performance power plan or runs on a weaker adapter.
 MIN_POWER_LIMIT_W ?= $(if $(filter rtx4060-laptop,$(DEVICE)),75,0)
+# cuBLAS baseline at 4096^3 for this device (median of independent runs) and
+# its run-to-run band, in percent. A run whose k0 falls outside the band is
+# flagged in every row it writes.
+K0_BASELINE ?= $(if $(filter rtx4060-laptop,$(DEVICE)),9028.0,0)
+K0_BAND_PCT ?= $(if $(filter rtx4060-laptop,$(DEVICE)),2.2,0)
 BENCH_FLAGS = --device-tag $(DEVICE) --log-clocks --warmup-seconds $(WARMUP_S) \
-              --reps $(REPS) --min-power-limit $(MIN_POWER_LIMIT_W)
+              --reps $(REPS) --min-power-limit $(MIN_POWER_LIMIT_W) \
+              --k0-baseline $(K0_BASELINE) --k0-band $(K0_BAND_PCT)
 
-.PHONY: all build test bench sweep tune profile format clean
+.PHONY: all build test test-verify bench sweep tune profile format clean
 
 all: build
 
@@ -61,6 +67,12 @@ $(BUILD)/%.o: %.cu $(HEADERS)
 # Correctness over three shapes: main / non-divisible / tiny
 test: build
 	$(BIN) --preset correctness --no-bench
+
+# Margin test for the correctness tolerance (host only, no GPU)
+test-verify:
+	@mkdir -p $(BUILD)
+	$(CXX) -O2 -std=c++17 csrc/tests/verify_margin.cpp -o $(BUILD)/verify_margin
+	$(BUILD)/verify_margin
 
 # Headline number. One rung only: make bench KERNELS=k0
 bench: build
