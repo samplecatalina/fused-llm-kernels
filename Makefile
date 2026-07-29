@@ -87,10 +87,13 @@ tune: build
 	$(BIN) --kernel k0,$(TUNE_KERNELS) --shape $(SHAPE) $(BENCH_FLAGS) \
 	  --csv $(RESULTS)/tuning_k7.csv
 
-# 512..8192 sweep: shows launch overhead at the small end and L2 effects
+# 512..8192 sweep: shows launch overhead at the small end and L2 effects.
+# Defaults to cuBLAS, the untiled coalesced rung (whose working set is all of
+# A and B) and the best rung; the slow early rungs would take hours at 8192.
+SWEEP_KERNELS ?= k0,k2,k7
 sweep: build
 	@mkdir -p $(RESULTS)
-	$(BIN) --kernel $(KERNELS) --preset sweep $(BENCH_FLAGS) \
+	$(BIN) --kernel $(SWEEP_KERNELS) --preset sweep $(BENCH_FLAGS) \
 	  --csv $(RESULTS)/gemm_sweep.csv
 
 # Collect an ncu report for one rung: make profile K=k1

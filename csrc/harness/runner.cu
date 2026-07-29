@@ -194,7 +194,8 @@ void usage() {
       "  --kernel <name|all>        comma separated, default all\n"
       "  --shape MxNxK              repeatable, default 4096x4096x4096\n"
       "  --preset correctness       three shapes: main / non-divisible / tiny\n"
-      "  --preset sweep             square sweep, 512..8192\n"
+      "  --preset sweep             square sweep, 512..8192, dense around\n"
+      "                             the size where A + B crosses L2\n"
       "  --reps N                   default 100\n"
       "  --warmup-seconds S         load for >= S s, then until the SM clock\n"
       "                             settles; default 30, 0 disables\n"
@@ -337,7 +338,12 @@ int main(int argc, char** argv) {
         o.shapes.push_back({4097, 513, 129});
         o.shapes.push_back({64, 64, 64});
       } else if (p == "sweep") {
-        for (int n = 512; n <= 8192; n *= 2) o.shapes.push_back({n, n, n});
+        // Square sizes from 512 to 8192, dense where A + B (8 N^2 bytes)
+        // crosses the size of L2: a knee in throughput is only locatable if
+        // the grid resolves it.
+        for (int n : {512, 768, 1024, 1280, 1408, 1536, 1664, 1792, 1920,
+                      2048, 2176, 2304, 2560, 3072, 4096, 6144, 8192})
+          o.shapes.push_back({n, n, n});
       } else {
         std::fprintf(stderr, "unknown preset: %s\n", p.c_str());
         return 2;
