@@ -23,6 +23,7 @@ SRCS        := csrc/harness/runner.cu $(KERNEL_SRCS)
 OBJS        := $(patsubst %.cu,$(BUILD)/%.o,$(SRCS))
 HEADERS     := $(wildcard csrc/*/*.h)
 BIN         := $(BUILD)/runner
+ROOFLINE    := $(BUILD)/roofline
 
 RESULTS    := results/$(DEVICE)
 REPORTS    := profiling/reports/$(DEVICE)
@@ -50,13 +51,17 @@ BENCH_FLAGS = --device-tag $(DEVICE) --log-clocks --warmup-seconds $(WARMUP_S) \
               --reps $(REPS) --min-power-limit $(MIN_POWER_LIMIT_W) \
               --k0-baseline $(K0_BASELINE) --k0-band $(K0_BAND_PCT)
 
-.PHONY: all build test test-verify bench sweep tune profile format clean
+.PHONY: all build test test-verify bench sweep tune roofline profile format clean
 
 all: build
 
-build: $(BIN)
+build: $(BIN) $(ROOFLINE)
 
 $(BIN): $(OBJS)
+	@mkdir -p $(dir $@)
+	$(NVCC) $(NVCCFLAGS) $^ -o $@ $(LDLIBS)
+
+$(ROOFLINE): $(BUILD)/csrc/roofline/roofline.o
 	@mkdir -p $(dir $@)
 	$(NVCC) $(NVCCFLAGS) $^ -o $@ $(LDLIBS)
 
@@ -86,6 +91,13 @@ tune: build
 	@mkdir -p $(RESULTS)
 	$(BIN) --kernel k0,$(TUNE_KERNELS) --shape $(SHAPE) $(BENCH_FLAGS) \
 	  --csv $(RESULTS)/tuning_k7.csv
+
+# Measured roofline ceilings: memory bandwidth and sustained FLOP rate
+roofline: build
+	@mkdir -p $(RESULTS)
+	$(ROOFLINE) --device-tag $(DEVICE) --warmup-seconds $(WARMUP_S) \
+	  --reps $(REPS) --min-power-limit $(MIN_POWER_LIMIT_W) \
+	  --csv $(RESULTS)/roofline.csv
 
 # 512..8192 sweep: shows launch overhead at the small end and L2 effects.
 # Defaults to cuBLAS, the untiled coalesced rung (whose working set is all of
