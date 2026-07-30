@@ -116,7 +116,7 @@ sweep: build
 profile: build
 	@mkdir -p $(REPORTS)
 	@set -o pipefail; log=$$(mktemp); \
-	out=$(REPORTS)/$(K)_$$(date +%Y%m%d_%H%M%S); \
+	out=$(REPORTS)/$(K)_$(SHAPE)_$$(date +%Y%m%d_%H%M%S); \
 	$(NCU) $(NCU_SECS) -k regex:$(K) --target-processes all \
 	  -o $$out --force-overwrite \
 	  $(BIN) --kernel $(K) --shape $(SHAPE) --reps 1 --warmup-seconds 0 \
