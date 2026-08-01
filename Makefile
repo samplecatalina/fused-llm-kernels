@@ -86,11 +86,13 @@ bench: build
 	  --csv $(RESULTS)/gemm_4096.csv
 
 # Parameter search over the tiling configurations of one rung
+TUNE_RUNG ?= k7
+TUNE_CSV ?= $(RESULTS)/tuning_$(TUNE_RUNG).csv
 TUNE_KERNELS ?= k7,k7c1,k7c2,k7c3,k7c4,k7c5,k7c6,k7c7,k7c8
 tune: build
 	@mkdir -p $(RESULTS)
 	$(BIN) --kernel k0,$(TUNE_KERNELS) --shape $(SHAPE) $(BENCH_FLAGS) \
-	  --csv $(RESULTS)/tuning_k7.csv
+	  --csv $(TUNE_CSV)
 
 # Measured roofline ceilings: memory bandwidth and sustained FLOP rate
 roofline: build
