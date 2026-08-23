@@ -231,6 +231,7 @@ void launch(int M, int N, int K, float alpha, const float* A, const float* B,
 }
 }  // namespace
 
+// The bounded search retained the K7 geometry and default carveout.
 void sgemm_k8_doublebuffer(int M, int N, int K, float alpha, const float* A,
                            const float* B, float beta, float* C) {
   launch<128, 64, 16, 8, 4, 32, 32>(M, N, K, alpha, A, B, beta, C, "k8");

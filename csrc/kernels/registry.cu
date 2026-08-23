@@ -20,7 +20,7 @@ const KernelEntry kKernels[] = {
     {"k7c6", "warp tiling, 128x128x32 tiles, 32x64 warp tile", sgemm_k7_c6},
     {"k7c7", "warp tiling, 256x128x16 tiles, 512 threads", sgemm_k7_c7},
     {"k7c8", "warp tiling, 128x256x16 tiles, 512 threads", sgemm_k7_c8},
-    {"k8", "double buffering; 128/64/16/8/4/32/32; initial control", sgemm_k8_doublebuffer},
+    {"k8", "double buffering; 128/64/16/8/4/32/32; selected control geometry", sgemm_k8_doublebuffer},
     {"k8c1", "double buffering; 128/64/16/8/4/32/32; K7 geometry control", sgemm_k8_c1},
     {"k8c2", "double buffering; 64/64/16/4/8/32/32; smaller tile", sgemm_k8_c2},
     {"k8c3", "double buffering; 128/64/16/8/4/32/32/true; maximum shared carveout", sgemm_k8_c3},
