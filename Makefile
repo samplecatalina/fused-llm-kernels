@@ -51,7 +51,7 @@ BENCH_FLAGS = --device-tag $(DEVICE) --log-clocks --warmup-seconds $(WARMUP_S) \
               --reps $(REPS) --min-power-limit $(MIN_POWER_LIMIT_W) \
               --k0-baseline $(K0_BASELINE) --k0-band $(K0_BAND_PCT)
 
-.PHONY: all build test test-verify bench sweep tune roofline profile format clean
+.PHONY: all build test test-verify test-k8 bench sweep tune roofline profile format clean
 
 all: build
 
@@ -72,6 +72,13 @@ $(BUILD)/%.o: %.cu $(HEADERS)
 # Correctness over three shapes: main / non-divisible / tiny
 test: build
 	$(BIN) --preset correctness --no-bench
+
+# K8 tails, buffer reuse, empty reductions, and nonzero initial C.
+$(BUILD)/k8_boundaries: csrc/tests/k8_boundaries.cu $(BUILD)/csrc/kernels/k8_doublebuffer.o $(HEADERS)
+	$(NVCC) $(NVCCFLAGS) $< $(BUILD)/csrc/kernels/k8_doublebuffer.o -o $@ $(LDLIBS)
+
+test-k8: $(BUILD)/k8_boundaries
+	$<
 
 # Margin test for the correctness tolerance (host only, no GPU)
 test-verify:

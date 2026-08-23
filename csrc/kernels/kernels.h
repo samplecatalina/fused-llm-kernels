@@ -47,6 +47,21 @@ void sgemm_k7_c7(int M, int N, int K, float alpha, const float* A,
 void sgemm_k7_c8(int M, int N, int K, float alpha, const float* A,
                   const float* B, float beta, float* C);
 
+
+// K8 double buffering and its bounded parameter search.
+void sgemm_k8_doublebuffer(int M, int N, int K, float alpha, const float* A,
+                          const float* B, float beta, float* C);
+void sgemm_k8_c1(int M, int N, int K, float alpha, const float* A,
+                          const float* B, float beta, float* C);
+void sgemm_k8_c2(int M, int N, int K, float alpha, const float* A,
+                          const float* B, float beta, float* C);
+void sgemm_k8_c3(int M, int N, int K, float alpha, const float* A,
+                          const float* B, float beta, float* C);
+void sgemm_k8_c4(int M, int N, int K, float alpha, const float* A,
+                          const float* B, float beta, float* C);
+void sgemm_k8_c5(int M, int N, int K, float alpha, const float* A,
+                          const float* B, float beta, float* C);
+
 extern const KernelEntry kKernels[];
 extern const int kNumKernels;
 const KernelEntry* find_kernel(const char* name);
