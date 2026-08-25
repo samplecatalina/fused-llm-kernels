@@ -231,10 +231,10 @@ void launch(int M, int N, int K, float alpha, const float* A, const float* B,
 }
 }  // namespace
 
-// The bounded search retained the K7 geometry and default carveout.
+// Best observed configuration in the repeated bounded search: wider tile.
 void sgemm_k8_doublebuffer(int M, int N, int K, float alpha, const float* A,
                            const float* B, float beta, float* C) {
-  launch<128, 64, 16, 8, 4, 32, 32>(M, N, K, alpha, A, B, beta, C, "k8");
+  launch<128, 128, 16, 8, 8, 32, 64>(M, N, K, alpha, A, B, beta, C, "k8");
 }
 void sgemm_k8_c1(int M, int N, int K, float alpha, const float* A,
                  const float* B, float beta, float* C) {
