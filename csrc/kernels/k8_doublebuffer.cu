@@ -1,11 +1,20 @@
 #include "../common/cuda_utils.h"
 #include "kernels.h"
 
-// K8: software prefetch into registers, then alternate two shared tiles.
-// Global reads for tile t+1 are issued before the FMAs for tile t. Their
-// results are consumed by shared stores after those FMAs. This exposes
-// independent work to the scheduler; overlap is not guaranteed by C++ order.
-// No warp may overwrite a buffer still being read by another warp.
+// K8: double buffering. Two shared tiles alternate: while the FMAs for tile
+// t read one buffer, the global reads for tile t+1 fill the other, so a
+// single barrier per tile both publishes the next tile and retires the
+// readers of the current one (K7 needs two). No warp may overwrite a buffer
+// still being read by another warp.
+//
+// Two ways to stage the next tile are kept:
+//   - direct (default): global loads are stored straight into the other
+//     buffer. Register usage matches K7 at the same geometry.
+//   - register prefetch (k8c1..k8c5): loads land in registers first and are
+//     stored after the FMAs. This orders the stores after the compute but
+//     holds extra register state and copies every value twice.
+// Neither form guarantees that the global loads and FMAs overlap in time;
+// C++ order only exposes independent work to the scheduler.
 
 namespace {
 
@@ -206,6 +215,145 @@ __global__ void k8_doublebuffer_kernel(int M, int N, int K, float alpha,
   }
 }
 
+// Direct variant: global loads for the next tile are stored straight into
+// the other shared buffer, so no loaded value is held in registers across
+// the FMAs. A single load call site (the loop starts one tile early) keeps
+// the register count equal to K7's at the same geometry.
+template <int BM, int BN, int BK, int TM, int TN, int WM, int WN>
+__device__ __forceinline__ void load_direct(int M, int N, int K, const float* A,
+                                            const float* B, int m0, int n0,
+                                            int k0, float* As, float* Bs) {
+  using C_ = Cfg<BM, BN, BK, TM, TN, WM, WN>;
+  const int tid = static_cast<int>(threadIdx.x);
+  const bool vec_a = K % 4 == 0;
+  const bool vec_b = N % 4 == 0;
+  for (int s = 0; s < C_::kAPerThread; ++s) {
+    const int chunk = tid * C_::kAPerThread + s;
+    const int row = chunk / C_::kAChunksPerRow;
+    const int kc = (chunk % C_::kAChunksPerRow) * 4;
+    const int m = m0 + row;
+    float v[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    if (m < M) {
+      if (vec_a && k0 + kc + 3 < K) {
+        const float4 t = *reinterpret_cast<const float4*>(&A[m * K + k0 + kc]);
+        v[0] = t.x;
+        v[1] = t.y;
+        v[2] = t.z;
+        v[3] = t.w;
+      } else {
+        for (int e = 0; e < 4; ++e) {
+          const int k = k0 + kc + e;
+          v[e] = (k < K) ? A[m * K + k] : 0.0f;
+        }
+      }
+    }
+    for (int e = 0; e < 4; ++e) As[(kc + e) * BM + row] = v[e];
+  }
+
+  for (int s = 0; s < C_::kBPerThread; ++s) {
+    const int chunk = tid * C_::kBPerThread + s;
+    const int kr = chunk / C_::kBChunksPerRow;
+    const int nc = (chunk % C_::kBChunksPerRow) * 4;
+    const int k = k0 + kr;
+    const int n = n0 + nc;
+    float v[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    if (k < K) {
+      if (vec_b && n + 3 < N) {
+        const float4 t = *reinterpret_cast<const float4*>(&B[k * N + n]);
+        v[0] = t.x;
+        v[1] = t.y;
+        v[2] = t.z;
+        v[3] = t.w;
+      } else {
+        for (int e = 0; e < 4; ++e) {
+          const int nn = n + e;
+          v[e] = (nn < N) ? B[k * N + nn] : 0.0f;
+        }
+      }
+    }
+    *reinterpret_cast<float4*>(&Bs[chunk * 4]) =
+        make_float4(v[0], v[1], v[2], v[3]);
+  }
+}
+
+template <int BM, int BN, int BK, int TM, int TN, int WM, int WN>
+__global__ void k8_direct_kernel(int M, int N, int K, float alpha,
+                                 const float* __restrict__ A,
+                                 const float* __restrict__ B, float beta,
+                                 float* __restrict__ C) {
+  using C_ = Cfg<BM, BN, BK, TM, TN, WM, WN>;
+  static_assert(C_::kLaneRows * C_::kLaneCols == 32,
+                "the 32 threads of a warp must cover the warp tile exactly");
+  static_assert(
+      C_::kAChunks % C_::kThreads == 0 && C_::kBChunks % C_::kThreads == 0,
+      "tile loading must divide evenly among the threads");
+  static_assert(C_::kSharedBytes <= 48 * 1024,
+                "shared memory per block exceeds the default limit");
+
+  const int tid = static_cast<int>(threadIdx.x);
+  const int warp = tid / 32;
+  const int lane = tid % 32;
+  const int wm = (warp / C_::kWarpsN) * WM;
+  const int wn = (warp % C_::kWarpsN) * WN;
+  const int lr = (lane / C_::kLaneCols) * TM;
+  const int lc = (lane % C_::kLaneCols) * TN;
+
+  const int m0 = static_cast<int>(blockIdx.y) * BM;
+  const int n0 = static_cast<int>(blockIdx.x) * BN;
+  const int rm = m0 + wm + lr;
+  const int rn = n0 + wn + lc;
+  const bool any_ok = rm < M && rn < N;
+
+  __shared__ alignas(16) float As[2][BK * BM];  // transposed: As[k][row]
+  __shared__ alignas(16) float Bs[2][BK * BN];
+
+  float res[TM * TN] = {};
+  // Iteration k0 loads tile k0+BK into buffer ((k0+BK)/BK)&1 and computes
+  // tile k0 from the other buffer. The barrier publishes the new tile and
+  // retires every reader of the old one before it is overwritten.
+  for (int k0 = -BK; k0 < K; k0 += BK) {
+    const int nk = k0 + BK;
+    if (nk < K)
+      load_direct<BM, BN, BK, TM, TN, WM, WN>(
+          M, N, K, A, B, m0, n0, nk, As[(nk / BK) & 1], Bs[(nk / BK) & 1]);
+    if (k0 >= 0 && any_ok) {
+      const int cur = (k0 / BK) & 1;
+      for (int tk = 0; tk < BK; ++tk) {
+        float ra[TM];
+        float rb[TN];
+        for (int e = 0; e < TM; e += 4) {
+          const float4 t =
+              *reinterpret_cast<const float4*>(&As[cur][tk * BM + wm + lr + e]);
+          ra[e] = t.x;
+          ra[e + 1] = t.y;
+          ra[e + 2] = t.z;
+          ra[e + 3] = t.w;
+        }
+        for (int e = 0; e < TN; e += 4) {
+          const float4 t =
+              *reinterpret_cast<const float4*>(&Bs[cur][tk * BN + wn + lc + e]);
+          rb[e] = t.x;
+          rb[e + 1] = t.y;
+          rb[e + 2] = t.z;
+          rb[e + 3] = t.w;
+        }
+        for (int i = 0; i < TM; ++i)
+          for (int j = 0; j < TN; ++j) res[i * TN + j] += ra[i] * rb[j];
+      }
+    }
+    if (nk < K) __syncthreads();
+  }
+
+  if (!any_ok) return;
+  for (int i = 0; i < TM && rm + i < M; ++i) {
+    const int m = rm + i;
+    for (int j = 0; j < TN && rn + j < N; ++j) {
+      const int n = rn + j;
+      C[m * N + n] = alpha * res[i * TN + j] + beta * C[m * N + n];
+    }
+  }
+}
+
 namespace {
 template <int BM, int BN, int BK, int TM, int TN, int WM, int WN,
           bool MaxShared = false>
@@ -231,10 +379,17 @@ void launch(int M, int N, int K, float alpha, const float* A, const float* B,
 }
 }  // namespace
 
-// Original K7 geometry selected for validation after the repeated search.
+// Default: direct stores at the K7 geometry. It keeps K7's register count
+// (so four blocks still fit on an SM) and avoids the extra register copy of
+// the prefetch variants below, which are kept as the searched alternatives.
 void sgemm_k8_doublebuffer(int M, int N, int K, float alpha, const float* A,
                            const float* B, float beta, float* C) {
-  launch<128, 64, 16, 8, 4, 32, 32>(M, N, K, alpha, A, B, beta, C, "k8");
+  using C_ = Cfg<128, 64, 16, 8, 4, 32, 32>;
+  dim3 block(C_::kThreads);
+  dim3 grid((N + 64 - 1) / 64, (M + 128 - 1) / 128);
+  k8_direct_kernel<128, 64, 16, 8, 4, 32, 32>
+      <<<grid, block>>>(M, N, K, alpha, A, B, beta, C);
+  check_launch("k8");
 }
 void sgemm_k8_c1(int M, int N, int K, float alpha, const float* A,
                  const float* B, float beta, float* C) {
