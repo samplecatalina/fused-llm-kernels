@@ -34,3 +34,15 @@ const KernelEntry* find_kernel(const char* name) {
     if (std::strcmp(kKernels[i].name, name) == 0) return &kKernels[i];
   return nullptr;
 }
+
+const EpilogueEntry kEpilogues[] = {
+    {"e0", "unfused: K7-structured GEMM into a buffer, then bias+SiLU pass; 128/64/16/8/4/32/32", epilogue_e0_unfused},
+    {"e1", "fused: bias+SiLU applied in the K7 register block; 128/64/16/8/4/32/32", epilogue_e1_fused},
+};
+const int kNumEpilogues = sizeof(kEpilogues) / sizeof(kEpilogues[0]);
+
+const EpilogueEntry* find_epilogue(const char* name) {
+  for (int i = 0; i < kNumEpilogues; ++i)
+    if (std::strcmp(kEpilogues[i].name, name) == 0) return &kEpilogues[i];
+  return nullptr;
+}

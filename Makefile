@@ -51,7 +51,7 @@ BENCH_FLAGS = --device-tag $(DEVICE) --log-clocks --warmup-seconds $(WARMUP_S) \
               --reps $(REPS) --min-power-limit $(MIN_POWER_LIMIT_W) \
               --k0-baseline $(K0_BASELINE) --k0-band $(K0_BAND_PCT)
 
-.PHONY: all build test test-verify test-k8 bench sweep tune roofline profile format clean
+.PHONY: all build test test-verify test-k8 test-epilogue epilogue bench sweep tune roofline profile format clean
 
 all: build
 
@@ -78,6 +78,15 @@ $(BUILD)/k8_boundaries: csrc/tests/k8_boundaries.cu $(BUILD)/csrc/kernels/k8_dou
 	$(NVCC) $(NVCCFLAGS) $< $(BUILD)/csrc/kernels/k8_doublebuffer.o -o $@ $(LDLIBS)
 
 test-k8: $(BUILD)/k8_boundaries
+	$<
+
+# Epilogue kernels: row tails, partial tiles, SiLU tails, D never read.
+# Links every kernel object because the registry references all of them.
+KERNEL_OBJS := $(patsubst %.cu,$(BUILD)/%.o,$(KERNEL_SRCS))
+$(BUILD)/epilogue_checks: csrc/tests/epilogue_checks.cu $(KERNEL_OBJS) $(HEADERS)
+	$(NVCC) $(NVCCFLAGS) $< $(KERNEL_OBJS) -o $@ $(LDLIBS)
+
+test-epilogue: $(BUILD)/epilogue_checks
 	$<
 
 # Margin test for the correctness tolerance (host only, no GPU)
@@ -116,6 +125,14 @@ sweep: build
 	@mkdir -p $(RESULTS)
 	$(BIN) --kernel $(SWEEP_KERNELS) --preset sweep $(BENCH_FLAGS) \
 	  --csv $(RESULTS)/gemm_sweep.csv
+
+# Epilogue fusion sweep over K at M = N = 4096. The order e0,e1,e1,e0 puts
+# each kernel in an early and a late slot of every shape.
+EPILOGUE_KERNELS ?= k0,e0,e1,e1,e0
+epilogue: build
+	@mkdir -p $(RESULTS)
+	$(BIN) --kernel $(EPILOGUE_KERNELS) --preset epilogue $(BENCH_FLAGS) \
+	  --csv $(RESULTS)/epilogue_sweep.csv
 
 # Collect an ncu report for one rung: make profile K=k1
 # The binary .ncu-rep stays local (tens of MB); its details page is exported

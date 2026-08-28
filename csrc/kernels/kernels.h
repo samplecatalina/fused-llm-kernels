@@ -65,3 +65,23 @@ void sgemm_k8_c5(int M, int N, int K, float alpha, const float* A,
 extern const KernelEntry kKernels[];
 extern const int kNumKernels;
 const KernelEntry* find_kernel(const char* name);
+
+// E track: fused epilogue, D = SiLU(alpha * A(MxK) * B(KxN) + bias), with
+// bias (length N) broadcast over the columns. No beta: D is output only.
+using EpilogueFn = void (*)(int M, int N, int K, float alpha, const float* A,
+                            const float* B, const float* bias, float* D);
+
+struct EpilogueEntry {
+  const char* name;
+  const char* desc;
+  EpilogueFn fn;
+};
+
+void epilogue_e0_unfused(int M, int N, int K, float alpha, const float* A,
+                         const float* B, const float* bias, float* D);
+void epilogue_e1_fused(int M, int N, int K, float alpha, const float* A,
+                       const float* B, const float* bias, float* D);
+
+extern const EpilogueEntry kEpilogues[];
+extern const int kNumEpilogues;
+const EpilogueEntry* find_epilogue(const char* name);

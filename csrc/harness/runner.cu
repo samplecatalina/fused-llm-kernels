@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstring>
 #include <ctime>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -98,8 +99,11 @@ double percentile(const std::vector<double>& sorted, double q) {
 // the first timed repetitions then run faster than the rest. Instead the GPU
 // is kept loaded for at least warmup_seconds and then until the SM clock
 // settles, up to a cap. Whether it settled is recorded, not assumed.
-Warmup warm_up(SgemmFn fn, const Shape& s, const Options& o, const float* dA,
-               const float* dB, float* dC, const std::string& gpu_id) {
+// A kernel under test, with its arguments bound: SGEMM rungs and epilogue
+// kernels have different signatures but share warmup and timing.
+using Invoke = std::function<void()>;
+
+Warmup warm_up(const Invoke& fn, const Options& o, const std::string& gpu_id) {
   Warmup w;
   if (o.warmup_seconds > 0.0) {
     w.mode = "seconds";
@@ -111,7 +115,7 @@ Warmup warm_up(SgemmFn fn, const Shape& s, const Options& o, const float* dA,
     double last_check = t0;
     bool settled = false;
     for (;;) {
-      fn(s.M, s.N, s.K, o.alpha, dA, dB, o.beta, dC);
+      fn();
       CUDA_CHECK(cudaDeviceSynchronize());
       ++w.iters;
       const double now = now_s();
@@ -130,8 +134,7 @@ Warmup warm_up(SgemmFn fn, const Shape& s, const Options& o, const float* dA,
   } else if (o.warmup_iters > 0) {
     w.mode = "iters";
     const double t0 = now_s();
-    for (int i = 0; i < o.warmup_iters; ++i)
-      fn(s.M, s.N, s.K, o.alpha, dA, dB, o.beta, dC);
+    for (int i = 0; i < o.warmup_iters; ++i) fn();
     CUDA_CHECK(cudaDeviceSynchronize());
     w.iters = o.warmup_iters;
     w.seconds = now_s() - t0;
@@ -141,8 +144,7 @@ Warmup warm_up(SgemmFn fn, const Shape& s, const Options& o, const float* dA,
 
 // Time each iteration separately rather than dividing a total by a count: the
 // per-iteration distribution exposes clock drift and occasional stalls.
-Timing time_kernel(SgemmFn fn, const Shape& s, const Options& o,
-                   const float* dA, const float* dB, float* dC) {
+Timing time_kernel(const Invoke& fn, const Options& o) {
   cudaEvent_t start, stop;
   CUDA_CHECK(cudaEventCreate(&start));
   CUDA_CHECK(cudaEventCreate(&stop));
@@ -153,7 +155,7 @@ Timing time_kernel(SgemmFn fn, const Shape& s, const Options& o,
   t.start_s = now_s();
   for (int i = 0; i < o.reps; ++i) {
     CUDA_CHECK(cudaEventRecord(start));
-    fn(s.M, s.N, s.K, o.alpha, dA, dB, o.beta, dC);
+    fn();
     CUDA_CHECK(cudaEventRecord(stop));
     CUDA_CHECK(cudaEventSynchronize(stop));
     float ms = 0.f;
@@ -192,11 +194,14 @@ bool parse_shape(const char* str, Shape* out) {
 void usage() {
   std::printf(
       "usage: runner [options]\n"
-      "  --kernel <name|all>        comma separated, default all\n"
+      "  --kernel <name|all>        comma separated, default all (SGEMM rungs\n"
+      "                             and the epilogue kernels e0/e1)\n"
+      "                             (D = SiLU(alpha*A*B + bias); beta unused)\n"
       "  --shape MxNxK              repeatable, default 4096x4096x4096\n"
       "  --preset correctness       three shapes: main / non-divisible / tiny\n"
       "  --preset sweep             square sweep, 512..8192, dense around\n"
       "                             the size where A + B crosses L2\n"
+      "  --preset epilogue          4096x4096xK, K = 32..8192 (epilogue sweep)\n"
       "  --reps N                   default 100\n"
       "  --warmup-seconds S         load for >= S s, then until the SM clock\n"
       "                             settles; default 30, 0 disables\n"
@@ -280,6 +285,10 @@ int main(int argc, char** argv) {
         for (int n : {512, 768, 1024, 1280, 1408, 1536, 1664, 1792, 1920,
                       2048, 2176, 2304, 2560, 3072, 4096, 6144, 8192})
           o.shapes.push_back({n, n, n});
+      } else if (p == "epilogue") {
+        // Fusion gain depends on the reduction depth K, not on M and N.
+        for (int k : {32, 64, 128, 256, 512, 1024, 2048, 4096, 8192})
+          o.shapes.push_back({4096, 4096, k});
       } else {
         std::fprintf(stderr, "unknown preset: %s\n", p.c_str());
         return 2;
@@ -326,11 +335,11 @@ int main(int argc, char** argv) {
     }
   }
   if (o.shapes.empty()) o.shapes.push_back({4096, 4096, 4096});
-  if (o.kernels.empty())
-    for (int i = 0; i < kNumKernels; ++i) o.kernels.push_back(kKernels[i].name);
-  if (o.kernels.size() == 1 && o.kernels[0] == "all") {
+  if (o.kernels.empty() || (o.kernels.size() == 1 && o.kernels[0] == "all")) {
     o.kernels.clear();
     for (int i = 0; i < kNumKernels; ++i) o.kernels.push_back(kKernels[i].name);
+    for (int i = 0; i < kNumEpilogues; ++i)
+      o.kernels.push_back(kEpilogues[i].name);
   }
   if (o.reps < 1) {
     std::fprintf(stderr, "--reps must be >= 1\n");
@@ -451,17 +460,35 @@ int main(int argc, char** argv) {
 
     auto hA = make_host_matrix(s.M, s.K, 1234u);
     auto hB = make_host_matrix(s.K, s.N, 5678u);
+    auto hBias = make_host_matrix(1, s.N, 9012u);
     float* dA = device_alloc(nA);
     float* dB = device_alloc(nB);
     float* dC = device_alloc(nC);
+    float* dBias = device_alloc(static_cast<size_t>(s.N));
     host_to_device(dA, hA);
     host_to_device(dB, hB);
+    host_to_device(dBias, hBias);
 
     // Reference is always K0, on the same inputs and the same device buffers.
     CUDA_CHECK(cudaMemset(dC, 0, nC * sizeof(float)));
     sgemm_k0_cublas(s.M, s.N, s.K, o.alpha, dA, dB, o.beta, dC);
     CUDA_CHECK(cudaDeviceSynchronize());
     auto ref = device_to_host(dC, nC);
+    // Epilogue reference: the cuBLAS product (C started at zero, so beta
+    // plays no part), then bias and SiLU on the host in double precision.
+    std::vector<float> ref_epi;
+    const auto epilogue_ref = [&]() -> const std::vector<float>& {
+      if (ref_epi.empty()) {
+        ref_epi.resize(nC);
+        for (size_t i = 0; i < nC; ++i) {
+          const double x = static_cast<double>(ref[i]) + hBias[i % s.N];
+          const double e = std::exp(-std::fabs(x));
+          ref_epi[i] = static_cast<float>(x * (x >= 0.0 ? 1.0 / (1.0 + e)
+                                                         : e / (1.0 + e)));
+        }
+      }
+      return ref_epi;
+    };
 
     std::printf("=== shape %dx%dx%d ===\n", s.M, s.N, s.K);
     std::printf("%-6s %11s %9s %9s %9s %10s %10s %10s\n", "kernel",
@@ -479,20 +506,30 @@ int main(int argc, char** argv) {
     const char* baseline_state = baseline_applies ? "no-k0-yet" : "n/a";
     for (const std::string& kname : o.kernels) {
       const KernelEntry* ke = find_kernel(kname.c_str());
-      if (!ke) {
+      const EpilogueEntry* ee = ke ? nullptr : find_epilogue(kname.c_str());
+      if (!ke && !ee) {
         std::fprintf(stderr, "unknown kernel: %s\n", kname.c_str());
         failures++;
         continue;
       }
+      const char* name = ke ? ke->name : ee->name;
+      const char* desc = ke ? ke->desc : ee->desc;
+      const Invoke run =
+          ke ? Invoke([&, fn = ke->fn] {
+                 fn(s.M, s.N, s.K, o.alpha, dA, dB, o.beta, dC);
+               })
+             : Invoke([&, fn = ee->fn] {
+                 fn(s.M, s.N, s.K, o.alpha, dA, dB, dBias, dC);
+               });
 
       VerifyResult vr;
       bool ok = true;
       if (o.check) {
         CUDA_CHECK(cudaMemset(dC, 0, nC * sizeof(float)));
-        ke->fn(s.M, s.N, s.K, o.alpha, dA, dB, o.beta, dC);
+        run();
         CUDA_CHECK(cudaDeviceSynchronize());
         auto got = device_to_host(dC, nC);
-        vr = verify(ref, got);
+        vr = verify(ke ? ref : epilogue_ref(), got);
         ok = vr.passed(1e-3, 1e-5);
         if (!ok) failures++;
       }
@@ -502,10 +539,10 @@ int main(int argc, char** argv) {
       GpuSample pre, start, end;
       if (o.bench) {
         if (o.log_clocks || o.min_power_limit_w > 0.0) pre = sample_gpu(gpu_id);
-        w = warm_up(ke->fn, s, o, dA, dB, dC, gpu_id);
+        w = warm_up(run, o, gpu_id);
         start = w.last;
         if (o.log_clocks && !start.valid) start = sample_gpu(gpu_id);
-        t = time_kernel(ke->fn, s, o, dA, dB, dC);
+        t = time_kernel(run, o);
         if (o.log_clocks || o.min_power_limit_w > 0.0) end = sample_gpu(gpu_id);
       }
       const bool power_ok =
@@ -539,7 +576,7 @@ int main(int argc, char** argv) {
           (t.median_ms > 0.0) ? 100.0 * (t.max_ms - t.min_ms) / t.median_ms : 0.0;
 
       std::printf("%-6s %11.3f %9.3f %9.3f %9.1f %9.1f%% %10.2e %10.2e  %s\n",
-                  ke->name, t.median_ms, t.p10_ms, t.p90_ms, g_med, pct,
+                  name, t.median_ms, t.p10_ms, t.p90_ms, g_med, pct,
                   vr.max_rel, vr.fro_rel, ok ? "" : "<< FAIL");
       if (!ok)
         std::printf("       worst @ %zu: ref=%.6f got=%.6f\n", vr.worst_index,
@@ -579,7 +616,7 @@ int main(int argc, char** argv) {
                                : -1.0;
         std::string row;
         row += utc_timestamp() + "," + rev + "," + o.device_tag + "," +
-               csv_safe(prop.name) + "," + ke->name + ",";
+               csv_safe(prop.name) + "," + name + ",";
         row += std::to_string(s.M) + "," + std::to_string(s.N) + "," +
                std::to_string(s.K) + ",";
         char buf[512];
@@ -615,7 +652,7 @@ int main(int argc, char** argv) {
         row += fmt_num(pre.power_limit_w, "%.2f") + "," +
                fmt_num(start.power_limit_w, "%.2f") + "," +
                fmt_num(end.power_limit_w, "%.2f") + ",";
-        row += csv_safe(ke->desc) + ",";
+        row += csv_safe(desc) + ",";
         row += baseline_state;
         std::fprintf(csv, "%s\n", row.c_str());
         std::fflush(csv);
@@ -626,6 +663,7 @@ int main(int argc, char** argv) {
     CUDA_CHECK(cudaFree(dA));
     CUDA_CHECK(cudaFree(dB));
     CUDA_CHECK(cudaFree(dC));
+    CUDA_CHECK(cudaFree(dBias));
   }
 
   if (csv) std::fclose(csv);
