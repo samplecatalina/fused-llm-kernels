@@ -51,7 +51,7 @@ BENCH_FLAGS = --device-tag $(DEVICE) --log-clocks --warmup-seconds $(WARMUP_S) \
               --reps $(REPS) --min-power-limit $(MIN_POWER_LIMIT_W) \
               --k0-baseline $(K0_BASELINE) --k0-band $(K0_BAND_PCT)
 
-.PHONY: all build test test-verify test-k8 test-epilogue epilogue bench sweep tune roofline profile format clean
+.PHONY: all build venv check-torch test test-verify test-k8 test-epilogue epilogue bench sweep tune roofline profile format clean
 
 all: build
 
@@ -88,6 +88,19 @@ $(BUILD)/epilogue_checks: csrc/tests/epilogue_checks.cu $(KERNEL_OBJS) $(HEADERS
 
 test-epilogue: $(BUILD)/epilogue_checks
 	$<
+
+# Python environment for the Triton operators (uv needs no python3-venv).
+# Every version in the lock file is pinned exactly, so letting uv pick a
+# package from whichever index has that version (PyTorch's or PyPI) is safe.
+PY ?= .venv/bin/python
+venv:
+	uv venv --python python3.12 .venv
+	uv pip install --python $(PY) --index-strategy unsafe-best-match \
+	  -r requirements-lock.txt
+
+# torch sees the GPU, cuBLAS and a Triton kernel give correct results
+check-torch:
+	$(PY) scripts/check_torch.py
 
 # Margin test for the correctness tolerance (host only, no GPU)
 test-verify:

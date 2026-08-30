@@ -1,0 +1,8 @@
+# Python environment for the Triton operators and their baselines.
+# PyTorch's CUDA 13.2 wheels; the development machine's driver (610.47)
+# supports CUDA 13.3, and a wheel must not need a newer driver than that.
+# Full resolved set: requirements-lock.txt
+--extra-index-url https://download.pytorch.org/whl/cu132
+torch==2.14.0+cu132
+triton==3.8.0
+numpy==2.5.3
