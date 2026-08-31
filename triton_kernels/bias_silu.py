@@ -15,7 +15,8 @@ import triton.language as tl
 
 # Largest block a single Triton program may use.
 MAX_COLS = 131072
-# Provisional; replaced by the result of the bounded num_warps search.
+# Bounded search over 2, 4, 8, 16 at 4096x4096 (tuning_triton_bias_silu.csv):
+# 4 was fastest; all four were within 2.8% of each other.
 DEFAULT_NUM_WARPS = 4
 
 
