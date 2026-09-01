@@ -252,7 +252,7 @@ def main(argv=None):
                     return 1
         os.makedirs(os.path.dirname(opt.csv) or ".", exist_ok=True)
         csv_file = open(opt.csv, "a", newline="")
-        writer = csv.writer(csv_file)
+        writer = csv.writer(csv_file, lineterminator="\n")
         if not exists:
             writer.writerow(HEADER)
 
