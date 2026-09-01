@@ -102,39 +102,44 @@ venv:
 check-torch:
 	$(PY) scripts/check_torch.py
 
-# Triton operators: wrapper checks and SiLU tails, then every implementation
-# against the double-precision reference on the correctness shapes.
+# Triton operators. TRITON_OP selects the operator (bias_silu; more to come).
+# triton-test: the operator's own checks, then every registered
+# implementation against the double-precision reference.
+TRITON_OP ?= bias_silu
 TRITON_IMPLS ?= eager_composite,eager,compile,triton,triton,compile,eager,eager_composite
 triton-test:
-	$(PY) -m triton_kernels.test_bias_silu
-	$(PY) -m triton_kernels.bench --preset correctness --no-bench \
-	  --impl eager_composite,eager,compile,triton,triton_w2,triton_w4,triton_w8,triton_w16
+	$(PY) -m triton_kernels.test_$(TRITON_OP)
+	$(PY) -m triton_kernels.bench --op $(TRITON_OP) --preset correctness \
+	  --impl all --no-bench
 
 # rows = 4096, hidden = 1024..8192. Each implementation runs in an early and
 # a late slot of every shape (ABCD DCBA).
 TRITON_TAG ?=
 triton-bench:
 	@mkdir -p $(RESULTS)
-	$(PY) -m triton_kernels.bench --preset bias_silu --impl $(TRITON_IMPLS) \
+	$(PY) -m triton_kernels.bench --op $(TRITON_OP) --preset main \
+	  --impl $(TRITON_IMPLS) \
 	  --device-tag $(DEVICE) --log-clocks --warmup-seconds $(WARMUP_S) \
 	  --reps $(REPS) --min-power-limit $(MIN_POWER_LIMIT_W) --tag "$(TRITON_TAG)" \
-	  --csv $(RESULTS)/triton_bias_silu.csv
+	  --csv $(RESULTS)/triton_$(TRITON_OP).csv
 
-# ncu report for one Triton-track implementation: make triton-profile IMPL=eager
-# Kernel names: the Triton kernel is bias_silu_kernel, inductor's are
-# triton_*, PyTorch's eager ones are *elementwise_kernel*. The compile path
-# launches its kernel twice (compile, then the timed call); both are reported.
+# ncu report for one implementation: make triton-profile IMPL=eager
+# Kernel names: the handwritten kernel is <op>_kernel, inductor's are
+# triton_*, and PyTorch's eager kernels are matched per operator. The compile
+# path launches its kernel twice (compile, then the timed call); both are
+# reported.
 IMPL ?= triton
 TSHAPE ?= 4096x4096
-TRITON_KERNEL_RE = $(if $(filter compile,$(IMPL)),triton_,$(if $(filter eager%,$(IMPL)),elementwise,bias_silu))
+EAGER_KERNEL_RE_bias_silu = elementwise
+TRITON_KERNEL_RE = $(if $(filter compile,$(IMPL)),triton_,$(if $(filter eager%,$(IMPL)),$(EAGER_KERNEL_RE_$(TRITON_OP)),$(TRITON_OP)_kernel))
 triton-profile:
 	@mkdir -p $(REPORTS)
 	@set -o pipefail; \
-	out=$(REPORTS)/triton_$(IMPL)_$(TSHAPE)_$$(date +%Y%m%d_%H%M%S); \
-	$(NCU) $(NCU_SECS) -k regex:$(TRITON_KERNEL_RE) --target-processes all \
+	out=$(REPORTS)/triton_$(if $(filter bias_silu,$(TRITON_OP)),,$(TRITON_OP)_)$(IMPL)_$(TSHAPE)_$$(date +%Y%m%d_%H%M%S); \
+	$(NCU) $(NCU_SECS) -k regex:'$(TRITON_KERNEL_RE)' --target-processes all \
 	  -o $$out --force-overwrite \
-	  $(PY) -m triton_kernels.bench --impl $(IMPL) --shape $(TSHAPE) --reps 1 \
-	  --warmup-seconds 0 --warmup 0 --no-check; rc=$$?; \
+	  $(PY) -m triton_kernels.bench --op $(TRITON_OP) --impl $(IMPL) \
+	  --shape $(TSHAPE) --reps 1 --warmup-seconds 0 --warmup 0 --no-check; rc=$$?; \
 	if [[ -f $$out.ncu-rep ]]; then \
 	  $(NCU) -i $$out.ncu-rep --csv --page details > $$out.details.csv && \
 	  echo "triton-profile: details exported to $$out.details.csv"; \

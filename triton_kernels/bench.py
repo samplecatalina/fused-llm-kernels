@@ -17,13 +17,17 @@ allocates its intermediates and its result, and the fused paths allocate
 their result, as they would in use. torch.compile is compiled before warmup,
 once per shape.
 
+Operators are registered in OPS; each brings its input generator, host
+reference, implementations, preset shapes and minimum traffic per element.
+
 Usage:
-  python -m triton_kernels.bench --impl triton --shape 4096x4096
-  python -m triton_kernels.bench --preset bias_silu --impl eager_composite,eager,compile,triton,triton,compile,eager,eager_composite ...
+  python -m triton_kernels.bench --op bias_silu --impl triton --shape 4096x4096
+  python -m triton_kernels.bench --op bias_silu --preset main --impl eager_composite,eager,compile,triton,triton,compile,eager,eager_composite ...
+  python -m triton_kernels.bench --op bias_silu --preset correctness --impl all --no-bench
 """
 import argparse
 import csv
-import math
+import dataclasses
 import os
 import statistics
 import sys
@@ -42,7 +46,6 @@ SETTLE_TOL = 0.01
 SAMPLE_INTERVAL_S = 1.0
 SPREAD_WARN_PCT = 5.0
 MIN_PUBLISH_REPS = 100
-BYTES_PER_ELEMENT = 8  # the fused operator's minimum traffic: load x, store y
 
 HEADER = [
     "timestamp_utc", "source_rev", "device_tag", "gpu", "op", "impl", "rows",
@@ -58,17 +61,17 @@ HEADER = [
     "hw_thermal_ms", "hw_power_brake_ms", "tag", "torch", "triton", "desc",
 ]
 
-PRESETS = {
-    # Benchmark matrix: rows = 4096, hidden over 1024..8192.
-    "bias_silu": [(4096, h) for h in (1024, 2048, 4096, 8192)],
-    # Tails, a single row, non-power-of-two widths, the block limit.
-    "correctness": [(1, 1), (3, 5), (4097, 513), (64, 64), (7, 8191),
-                    (2, bs.MAX_COLS), (4096, 4096)],
-}
+@dataclasses.dataclass
+class Op:
+    """One operator under test: y = f(x, p) with x of shape (rows, hidden) and
+    a per-column parameter p of shape (hidden,)."""
+    impls: object              # () -> {name: (description, factory, num_warps)}
+    reference: object          # (x, p) -> float64 host tensor
+    presets: dict              # "main" / "correctness" -> [(rows, hidden)]
+    bytes_per_element: int     # the fused operator's minimum traffic
 
 
-def make_impls():
-    """Name -> (description, callable factory, num_warps)."""
+def bias_silu_impls():
     impls = {
         "eager_composite": ("eager: t = x + b; t * sigmoid(t) (3 launches)",
                             lambda: bs.eager_composite, None),
@@ -83,6 +86,22 @@ def make_impls():
             f"Triton, one program per row, num_warps={w}",
             lambda w=w: (lambda x, b: bs.bias_silu(x, b, num_warps=w)), w)
     return impls
+
+
+OPS = {
+    "bias_silu": Op(
+        impls=bias_silu_impls,
+        reference=vf.reference_bias_silu,
+        presets={
+            # Benchmark matrix: rows = 4096, hidden over 1024..8192.
+            "main": [(4096, h) for h in (1024, 2048, 4096, 8192)],
+            # Tails, a single row, non-power-of-two widths, the block limit.
+            "correctness": [(1, 1), (3, 5), (4097, 513), (64, 64), (7, 8191),
+                            (2, bs.MAX_COLS), (4096, 4096)],
+        },
+        bytes_per_element=8,  # load x, store y; the bias is served from L1
+    ),
+}
 
 
 def parse_shape(s):
@@ -165,11 +184,13 @@ def time_it(fn, args, reps):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--impl", default="eager_composite,eager,compile,triton",
-                    help="comma separated; repeat a name to time it in two slots")
+    ap.add_argument("--op", choices=sorted(OPS), default="bias_silu")
+    ap.add_argument("--impl", default="",
+                    help="comma separated; repeat a name to time it in two slots; "
+                         "'all' for every registered implementation (default: all)")
     ap.add_argument("--shape", type=parse_shape, action="append", default=[],
                     help="ROWSxHIDDEN, repeatable (default 4096x4096)")
-    ap.add_argument("--preset", choices=sorted(PRESETS))
+    ap.add_argument("--preset", choices=["main", "correctness"])
     ap.add_argument("--reps", type=int, default=100)
     ap.add_argument("--warmup-seconds", type=float, default=30.0)
     ap.add_argument("--warmup-max-seconds", type=float, default=0.0)
@@ -187,12 +208,15 @@ def main(argv=None):
     # Progress lines and refusals must interleave correctly in a log file.
     sys.stdout.reconfigure(line_buffering=True)
 
-    impls = make_impls()
+    op = OPS[opt.op]
+    impls = op.impls()
     names = [n for n in opt.impl.split(",") if n]
+    if not names or names == ["all"]:
+        names = list(impls)
     unknown = [n for n in names if n not in impls]
     if unknown:
         ap.error(f"unknown impl: {', '.join(unknown)} (known: {', '.join(impls)})")
-    shapes = list(PRESETS[opt.preset]) if opt.preset else []
+    shapes = list(op.presets[opt.preset]) if opt.preset else []
     shapes += opt.shape
     if not shapes:
         shapes = [(4096, 4096)]
@@ -259,11 +283,12 @@ def main(argv=None):
     failures = 0
     gen = torch.Generator(device="cpu").manual_seed(1234)
     for rows, hidden in shapes:
+        # x and the per-column parameter (bias, or weight) are uniform in [-1, 1).
         x = (torch.rand(rows, hidden, generator=gen) * 2 - 1).cuda()
         b = (torch.rand(hidden, generator=gen) * 2 - 1).cuda()
         if opt.check:
-            ref = vf.reference_bias_silu(x, b)
-        print(f"\n=== bias_silu {rows}x{hidden} ===")
+            ref = op.reference(x, b)
+        print(f"\n=== {opt.op} {rows}x{hidden} ===")
         print(f"{'impl':<16} {'ms(median)':>10} {'p10':>9} {'p90':>9} "
               f"{'GB/s eff':>9} {'%roof':>7} {'max_rel':>10} {'fro_rel':>10}")
         compiled = {}
@@ -308,7 +333,7 @@ def main(argv=None):
                       f"{end.power_limit_w:.1f} W during the run")
                 failures += 1
 
-            bytes_min = BYTES_PER_ELEMENT * rows * hidden
+            bytes_min = op.bytes_per_element * rows * hidden
             eff = (bytes_min / (t["median"] * 1e-3) / 1e9) if t["median"] > 0 else 0.0
             pct = 100.0 * eff / roof if (roof and eff > 0) else -1.0
             spread = (100.0 * (t["max"] - t["min"]) / t["median"]
@@ -337,7 +362,7 @@ def main(argv=None):
             if writer and ok and power_ok:
                 writer.writerow([
                     pv.utc_timestamp(), rev, opt.device_tag, pv.csv_safe(props.name),
-                    "bias_silu", name, rows, hidden, warps or "",
+                    opt.op, name, rows, hidden, warps or "",
                     "pass" if opt.check else "skipped",
                     f"{max_rel:.3e}" if opt.check else "",
                     f"{fro_rel:.3e}" if opt.check else "",
