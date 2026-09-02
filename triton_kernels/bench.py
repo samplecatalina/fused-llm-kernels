@@ -14,8 +14,9 @@ The same discipline as csrc/harness/runner.cu:
 
 Output allocation is inside the timed region for every implementation: eager
 allocates its intermediates and its result, and the fused paths allocate
-their result, as they would in use. torch.compile is compiled before warmup,
-once per shape.
+their result, as they would in use. Every implementation is called once per
+shape before its check and warmup, so compilation and module construction
+are never timed.
 
 Operators are registered in OPS; each brings its input generator, host
 reference, implementations, preset shapes and minimum traffic per element.
@@ -39,6 +40,7 @@ import triton
 from . import bias_silu as bs
 from . import gpu_monitor as gm
 from . import provenance as pv
+from . import rmsnorm as rn
 from . import verify as vf
 
 SETTLE_WINDOW = 5
@@ -88,6 +90,36 @@ def bias_silu_impls():
     return impls
 
 
+def rmsnorm_impls():
+    def native():
+        # The module holds its own copy of the weight; build it on first call
+        # (outside every timed region) for the weight passed in.
+        cache = {}
+
+        def run(x, w):
+            key = (w.data_ptr(), w.shape[0])
+            if key not in cache:
+                cache.clear()
+                cache[key] = rn.native_module(w)
+            return cache[key](x)
+        return run
+
+    impls = {
+        "eager": ("eager: x * rsqrt(pow(x, 2).mean(-1) + eps) * w (6 launches)",
+                  lambda: rn.eager, None),
+        "native": ("torch.nn.RMSNorm (1 launch)", native, None),
+        "compile": ("torch.compile of the eager expression",
+                    lambda: torch.compile(rn.eager, dynamic=False), None),
+        "triton": (f"Triton, one program per row, num_warps={rn.DEFAULT_NUM_WARPS}",
+                   lambda: rn.rmsnorm, rn.DEFAULT_NUM_WARPS),
+    }
+    for w in (2, 4, 8, 16):
+        impls[f"triton_w{w}"] = (
+            f"Triton, one program per row, num_warps={w}",
+            lambda w=w: (lambda x, p: rn.rmsnorm(x, p, num_warps=w)), w)
+    return impls
+
+
 OPS = {
     "bias_silu": Op(
         impls=bias_silu_impls,
@@ -100,6 +132,16 @@ OPS = {
                             (2, bs.MAX_COLS), (4096, 4096)],
         },
         bytes_per_element=8,  # load x, store y; the bias is served from L1
+    ),
+    "rmsnorm": Op(
+        impls=rmsnorm_impls,
+        reference=rn.reference,
+        presets={
+            "main": [(4096, h) for h in (1024, 2048, 4096, 8192)],
+            "correctness": [(1, 1), (3, 5), (4097, 513), (64, 64), (7, 8191),
+                            (2, rn.MAX_COLS), (4096, 4096)],
+        },
+        bytes_per_element=8,  # load x, store y; the weight is served from L1
     ),
 }
 
@@ -296,9 +338,11 @@ def main(argv=None):
             desc, factory, warps = impls[name]
             if name not in compiled:
                 compiled[name] = factory()
-                if name == "compile":  # compile outside every timed region
-                    compiled[name](x, b)
-                    torch.cuda.synchronize()
+                # One untimed call per shape: compiles (torch.compile, Triton
+                # JIT) and builds module state (nn.RMSNorm) outside every
+                # timed region.
+                compiled[name](x, b)
+                torch.cuda.synchronize()
             fn = compiled[name]
 
             max_rel = fro_rel = 0.0
