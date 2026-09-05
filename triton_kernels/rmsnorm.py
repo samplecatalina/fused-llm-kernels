@@ -16,7 +16,8 @@ import triton.language as tl
 
 MAX_COLS = 131072
 EPS = 1e-6
-# Provisional; replaced by the result of the bounded num_warps search.
+# Bounded search over 2, 4, 8, 16 at 4096x4096 (tuning_triton_rmsnorm.csv):
+# 4 was fastest; all four were within 1.1% of each other.
 DEFAULT_NUM_WARPS = 4
 
 
