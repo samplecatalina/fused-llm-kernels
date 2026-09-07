@@ -16,7 +16,9 @@ import triton
 import triton.language as tl
 
 MAX_COLS = 131072
-# Provisional; replaced by the result of the bounded num_warps search.
+# Bounded search over 2, 4, 8, 16 at 4096x4096 (tuning_triton_softmax.csv):
+# 2 was 0.6% faster than 4, under the 1% needed to change the default; all
+# four were within 1.0% of each other.
 DEFAULT_NUM_WARPS = 4
 
 
