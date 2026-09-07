@@ -41,6 +41,7 @@ from . import bias_silu as bs
 from . import gpu_monitor as gm
 from . import provenance as pv
 from . import rmsnorm as rn
+from . import softmax as sm
 from . import verify as vf
 
 SETTLE_WINDOW = 5
@@ -120,6 +121,25 @@ def rmsnorm_impls():
     return impls
 
 
+def softmax_impls():
+    # Softmax has no per-column parameter: every callable ignores it.
+    impls = {
+        "eager": ("eager: max, x - max, exp, sum, divide (5 launches)",
+                  lambda: (lambda x, _p: sm.eager(x)), None),
+        "native": ("torch.softmax (1 launch)", lambda: (lambda x, _p: sm.native(x)), None),
+        "compile": ("torch.compile of the eager expression",
+                    lambda: (lambda f: (lambda x, _p: f(x)))(
+                        torch.compile(sm.eager, dynamic=False)), None),
+        "triton": (f"Triton, one program per row, num_warps={sm.DEFAULT_NUM_WARPS}",
+                   lambda: (lambda x, _p: sm.softmax(x)), sm.DEFAULT_NUM_WARPS),
+    }
+    for w in (2, 4, 8, 16):
+        impls[f"triton_w{w}"] = (
+            f"Triton, one program per row, num_warps={w}",
+            lambda w=w: (lambda x, _p: sm.softmax(x, num_warps=w)), w)
+    return impls
+
+
 OPS = {
     "bias_silu": Op(
         impls=bias_silu_impls,
@@ -142,6 +162,18 @@ OPS = {
                             (2, rn.MAX_COLS), (4096, 4096)],
         },
         bytes_per_element=8,  # load x, store y; the weight is served from L1
+    ),
+    "softmax": Op(
+        impls=softmax_impls,
+        reference=lambda x, _p: sm.reference(x),
+        presets={
+            # torch.softmax switches implementation between hidden 2048 and
+            # 2049, so 2048 and 4096 exercise its two paths.
+            "main": [(4096, h) for h in (1024, 2048, 4096, 8192)],
+            "correctness": [(1, 1), (3, 5), (4097, 513), (64, 64), (7, 8191),
+                            (5, 2048), (5, 2049), (2, sm.MAX_COLS), (4096, 4096)],
+        },
+        bytes_per_element=8,  # load x, store y
     ),
 }
 
