@@ -114,14 +114,19 @@ triton-test:
 
 # rows = 4096, hidden = 1024..8192. Each implementation runs in an early and
 # a late slot of every shape (ABCD DCBA).
+# TIMING=pipeline submits the repetitions back to back with one synchronise
+# (throughput of a stream of calls) instead of timing each one on its own
+# (latency of a single call); its rows go to their own file.
 TRITON_TAG ?=
+TIMING ?= per-call
+TRITON_CSV = $(RESULTS)/triton_$(TRITON_OP)$(if $(filter pipeline,$(TIMING)),_pipeline,).csv
 triton-bench:
 	@mkdir -p $(RESULTS)
 	$(PY) -m triton_kernels.bench --op $(TRITON_OP) --preset main \
-	  --impl $(TRITON_IMPLS) \
+	  --impl $(TRITON_IMPLS) --timing $(TIMING) \
 	  --device-tag $(DEVICE) --log-clocks --warmup-seconds $(WARMUP_S) \
 	  --reps $(REPS) --min-power-limit $(MIN_POWER_LIMIT_W) --tag "$(TRITON_TAG)" \
-	  --csv $(RESULTS)/triton_$(TRITON_OP).csv
+	  --csv $(TRITON_CSV)
 
 # ncu report for one implementation: make triton-profile IMPL=eager
 # Kernel names: the handwritten kernel is <op>_kernel, inductor's are

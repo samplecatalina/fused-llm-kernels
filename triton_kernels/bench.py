@@ -6,7 +6,11 @@ The same discipline as csrc/harness/runner.cu:
   - warmup is measured in time: at least --warmup-seconds of load, then until
     the mean SM clock of the last 5 s is within 1% of the 5 s before, capped;
   - each repetition is timed on its own with CUDA events, and the median,
-    p10 and p90 are reported;
+    p10 and p90 are reported (--timing per-call, the default), or the
+    repetitions are submitted back to back with one synchronise at the end
+    and the mean per call is reported (--timing pipeline): the first measures
+    the latency of one call, the second the throughput of a stream of them,
+    and they differ once a call is short enough for the launch to matter;
   - clock, temperature, power, enforced power limit and clock-event state
     are recorded around every timed region;
   - rows are refused from uncommitted code (--allow-dirty marks them) and
@@ -61,7 +65,8 @@ HEADER = [
     "start_power_w", "start_power_limit_w", "start_reasons", "end_sm_mhz",
     "end_mem_mhz", "end_temp_c", "end_power_w", "end_power_limit_w",
     "end_reasons", "timed_s", "sw_power_cap_ms", "sw_thermal_ms",
-    "hw_thermal_ms", "hw_power_brake_ms", "tag", "torch", "triton", "desc",
+    "hw_thermal_ms", "hw_power_brake_ms", "tag", "torch", "triton", "timing",
+    "submit_ms", "desc",
 ]
 
 @dataclasses.dataclass
@@ -236,6 +241,22 @@ def warm_up(fn, args, opt, selector):
                 mean=mean, range_pct=rng)
 
 
+def time_pipeline(fn, args, reps):
+    """Submit `reps` calls back to back, synchronise once. Reported as the
+    mean per call: individual calls cannot be separated in this regime."""
+    torch.cuda.synchronize()
+    t0 = time.monotonic()
+    for _ in range(reps):
+        fn(*args)
+    submit_s = time.monotonic() - t0
+    torch.cuda.synchronize()
+    wall = time.monotonic() - t0
+    per_call = wall / reps * 1e3
+    return dict(median=per_call, p10=per_call, p90=per_call, min=per_call,
+                max=per_call, max_rep=-1, start_s=t0, wall_s=wall,
+                submit_ms=submit_s / reps * 1e3)
+
+
 def time_it(fn, args, reps):
     start = torch.cuda.Event(enable_timing=True)
     stop = torch.cuda.Event(enable_timing=True)
@@ -252,7 +273,7 @@ def time_it(fn, args, reps):
     q = statistics.quantiles(times, n=10, method="inclusive") if reps > 1 else times * 9
     return dict(median=statistics.median(times), p10=q[0], p90=q[8],
                 min=min(times), max=max(times), max_rep=max_rep,
-                start_s=t0, wall_s=wall)
+                start_s=t0, wall_s=wall, submit_ms=-1.0)
 
 
 def main(argv=None):
@@ -266,6 +287,11 @@ def main(argv=None):
                     help="ROWSxHIDDEN, repeatable (default 4096x4096)")
     ap.add_argument("--preset", choices=["main", "correctness"])
     ap.add_argument("--reps", type=int, default=100)
+    ap.add_argument("--timing", choices=["per-call", "pipeline"],
+                    default="per-call",
+                    help="per-call: CUDA events around every call (latency); "
+                         "pipeline: back-to-back submission, one synchronise, "
+                         "mean per call (throughput)")
     ap.add_argument("--warmup-seconds", type=float, default=30.0)
     ap.add_argument("--warmup-max-seconds", type=float, default=0.0)
     ap.add_argument("--warmup", dest="warmup_iters", type=int, default=0,
@@ -388,7 +414,7 @@ def main(argv=None):
                 failures += 0 if ok else 1
 
             t = dict(median=0.0, p10=0.0, p90=0.0, min=0.0, max=0.0, max_rep=-1,
-                     start_s=0.0, wall_s=0.0)
+                     start_s=0.0, wall_s=0.0, submit_ms=-1.0)
             w = dict(seconds=0.0, iters=0, settled="n/a", last=gm.GpuSample(),
                      mean=-1.0, range_pct=-1.0)
             pre = start = end = gm.GpuSample()
@@ -399,7 +425,8 @@ def main(argv=None):
                 start = w["last"]
                 if opt.log_clocks and not start.valid:
                     start = gm.sample_gpu(selector)
-                t = time_it(fn, (x, b), opt.reps)
+                t = (time_it(fn, (x, b), opt.reps) if opt.timing == "per-call"
+                     else time_pipeline(fn, (x, b), opt.reps))
                 if opt.log_clocks or opt.min_power_limit > 0:
                     end = gm.sample_gpu(selector)
             power_ok = (not opt.bench or opt.min_power_limit <= 0 or
@@ -462,6 +489,7 @@ def main(argv=None):
                     pv.fmt_num(gm.active_ms(start.us_hw_thermal, end.us_hw_thermal), ".1f"),
                     pv.fmt_num(gm.active_ms(start.us_hw_power_brake, end.us_hw_power_brake), ".1f"),
                     pv.csv_safe(opt.tag), torch.__version__, triton.__version__,
+                    opt.timing, pv.fmt_num(t["submit_ms"], ".6f"),
                     pv.csv_safe(desc),
                 ])
                 csv_file.flush()
