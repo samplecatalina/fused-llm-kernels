@@ -102,7 +102,8 @@ venv:
 check-torch:
 	$(PY) scripts/check_torch.py
 
-# Triton operators. TRITON_OP selects the operator: bias_silu, rmsnorm or softmax.
+# Triton operators. TRITON_OP selects the operator: bias_silu, rmsnorm,
+# rmsnorm_bwd or softmax.
 # triton-test: the operator's own checks, then every registered
 # implementation against the double-precision reference.
 TRITON_OP ?= bias_silu
@@ -139,6 +140,8 @@ EAGER_KERNEL_RE_bias_silu = elementwise
 EAGER_KERNEL_RE_rmsnorm = pow_tensor|reduce_kernel|elementwise
 NATIVE_KERNEL_RE_rmsnorm = layer_norm
 EAGER_KERNEL_RE_softmax = reduce_kernel|elementwise
+EAGER_KERNEL_RE_rmsnorm_bwd = reduce_kernel|elementwise
+NATIVE_KERNEL_RE_rmsnorm_bwd = layer_norm|LayerNorm
 NATIVE_KERNEL_RE_softmax = SoftMax|softmax_warp
 TRITON_KERNEL_RE = $(if $(filter compile,$(IMPL)),triton_,$(if $(filter eager%,$(IMPL)),$(EAGER_KERNEL_RE_$(TRITON_OP)),$(if $(filter native,$(IMPL)),$(NATIVE_KERNEL_RE_$(TRITON_OP)),$(TRITON_OP)_kernel)))
 triton-profile:

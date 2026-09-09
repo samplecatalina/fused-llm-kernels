@@ -45,6 +45,7 @@ from . import bias_silu as bs
 from . import gpu_monitor as gm
 from . import provenance as pv
 from . import rmsnorm as rn
+from . import rmsnorm_backward as rb
 from . import softmax as sm
 from . import verify as vf
 
@@ -60,7 +61,7 @@ HEADER = [
     "warmup_s", "warmup_iters", "warmup_settled", "warmup_sm_mean_mhz",
     "warmup_sm_range_pct", "reps", "ms_median", "ms_p10", "ms_p90", "ms_min",
     "ms_max", "ms_max_rep", "spread_pct", "bytes_min", "eff_bandwidth_gbs",
-    "pct_bandwidth_roof", "pre_sm_mhz", "pre_temp_c", "pre_power_w",
+    "pct_bandwidth_roof", "flops_per_call", "tflops", "pre_sm_mhz", "pre_temp_c", "pre_power_w",
     "pre_power_limit_w", "start_sm_mhz", "start_mem_mhz", "start_temp_c",
     "start_power_w", "start_power_limit_w", "start_reasons", "end_sm_mhz",
     "end_mem_mhz", "end_temp_c", "end_power_w", "end_power_limit_w",
@@ -71,12 +72,22 @@ HEADER = [
 
 @dataclasses.dataclass
 class Op:
-    """One operator under test: y = f(x, p) with x of shape (rows, hidden) and
-    a per-column parameter p of shape (hidden,)."""
+    """One operator under test.
+
+    By default the inputs are x of shape (rows, hidden) and a per-column
+    parameter p of shape (hidden,), and an implementation is called as
+    f(x, p). An operator with other inputs supplies make_inputs, which
+    returns the argument tuple; implementations and the reference take the
+    same tuple. The reference returns a host float64 tensor, or a tuple of
+    them when the operator produces several outputs.
+    """
     impls: object              # () -> {name: (description, factory, num_warps)}
-    reference: object          # (x, p) -> float64 host tensor
+    reference: object          # (*args) -> float64 host tensor(s)
     presets: dict              # "main" / "correctness" -> [(rows, hidden)]
-    bytes_per_element: int     # the fused operator's minimum traffic
+    bytes_per_element: int = 0  # minimum traffic; 0 leaves the column empty
+    make_inputs: object = None  # (rows, hidden, gen) -> tuple of arguments
+    flops: object = None        # (rows, hidden) -> FLOPs per call, or None
+    labels: tuple = ("rows", "hidden")   # what the two shape numbers mean
 
 
 def bias_silu_impls():
@@ -126,6 +137,33 @@ def rmsnorm_impls():
     return impls
 
 
+def rmsnorm_bwd_impls():
+    impls = {
+        "eager": ("autograd through the eager expression",
+                  lambda: rb.autograd_backward_fn(rb.eager_forward), None),
+        "native": ("autograd through PyTorch's fused RMSNorm",
+                   lambda: rb.autograd_backward_fn(rb.native_forward), None),
+        "compile": ("autograd through the compiled eager expression",
+                    lambda: rb.autograd_backward_fn(
+                        torch.compile(rb.eager_forward, dynamic=False)), None),
+        "triton": (f"Triton, dx and partial dw in one kernel, "
+                   f"num_warps={rb.DEFAULT_NUM_WARPS}",
+                   lambda: rb.rmsnorm_backward, rb.DEFAULT_NUM_WARPS),
+    }
+    for w in (2, 4, 8, 16):
+        impls[f"triton_w{w}"] = (
+            f"Triton, dx and partial dw in one kernel, num_warps={w}",
+            lambda w=w: (lambda x, p, dy: rb.rmsnorm_backward(x, p, dy, num_warps=w)), w)
+    return impls
+
+
+def rmsnorm_bwd_inputs(rows, hidden, gen):
+    x = (torch.rand(rows, hidden, generator=gen) * 2 - 1).cuda()
+    w = (torch.rand(hidden, generator=gen) * 2 - 1).cuda()
+    dy = (torch.rand(rows, hidden, generator=gen) * 2 - 1).cuda()
+    return x, w, dy
+
+
 def softmax_impls():
     # Softmax has no per-column parameter: every callable ignores it.
     impls = {
@@ -168,6 +206,20 @@ OPS = {
         },
         bytes_per_element=8,  # load x, store y; the weight is served from L1
     ),
+    "rmsnorm_bwd": Op(
+        impls=rmsnorm_bwd_impls,
+        reference=rb.reference,
+        make_inputs=rmsnorm_bwd_inputs,
+        presets={
+            "main": [(4096, h) for h in (1024, 2048, 4096, 8192)],
+            # hidden 1 is excluded: dx is a difference of two nearly equal
+            # terms there and no float32 implementation is accurate (see
+            # rmsnorm_backward.conditioning).
+            "correctness": [(3, 5), (4097, 513), (64, 64), (7, 8191),
+                            (2, rb.MAX_COLS), (4096, 4096)],
+        },
+        bytes_per_element=12,  # read dy, read x, write dx
+    ),
     "softmax": Op(
         impls=softmax_impls,
         reference=lambda x, _p: sm.reference(x),
@@ -181,6 +233,21 @@ OPS = {
         bytes_per_element=8,  # load x, store y
     ),
 }
+
+
+def default_inputs(rows, hidden, gen):
+    """x and the per-column parameter (bias, or weight), uniform in [-1, 1)."""
+    x = (torch.rand(rows, hidden, generator=gen) * 2 - 1).cuda()
+    p = (torch.rand(hidden, generator=gen) * 2 - 1).cuda()
+    return x, p
+
+
+def verify_outputs(ref, got):
+    """Worst max_rel and fro_rel over one or several outputs."""
+    if isinstance(ref, tuple):
+        pairs = [vf.verify(r, g) for r, g in zip(ref, got)]
+        return max(p[0] for p in pairs), max(p[1] for p in pairs)
+    return vf.verify(ref, got)
 
 
 def parse_shape(s):
@@ -383,14 +450,14 @@ def main(argv=None):
     failures = 0
     gen = torch.Generator(device="cpu").manual_seed(1234)
     for rows, hidden in shapes:
-        # x and the per-column parameter (bias, or weight) are uniform in [-1, 1).
-        x = (torch.rand(rows, hidden, generator=gen) * 2 - 1).cuda()
-        b = (torch.rand(hidden, generator=gen) * 2 - 1).cuda()
+        args = (op.make_inputs(rows, hidden, gen) if op.make_inputs
+                else default_inputs(rows, hidden, gen))
         if opt.check:
-            ref = op.reference(x, b)
-        print(f"\n=== {opt.op} {rows}x{hidden} ===")
+            ref = op.reference(*args)
+        print(f"\n=== {opt.op} {op.labels[0]}={rows} {op.labels[1]}={hidden} ===")
         print(f"{'impl':<16} {'ms(median)':>10} {'p10':>9} {'p90':>9} "
-              f"{'GB/s eff':>9} {'%roof':>7} {'max_rel':>10} {'fro_rel':>10}")
+              f"{'GB/s eff':>9} {'%roof':>7} {'TFLOP/s':>8} {'max_rel':>10} "
+              f"{'fro_rel':>10}")
         compiled = {}
         for name in names:
             desc, factory, warps = impls[name]
@@ -399,16 +466,16 @@ def main(argv=None):
                 # One untimed call per shape: compiles (torch.compile, Triton
                 # JIT) and builds module state (nn.RMSNorm) outside every
                 # timed region.
-                compiled[name](x, b)
+                compiled[name](*args)
                 torch.cuda.synchronize()
             fn = compiled[name]
 
             max_rel = fro_rel = 0.0
             ok = True
             if opt.check:
-                got = fn(x, b)
+                got = fn(*args)
                 torch.cuda.synchronize()
-                max_rel, fro_rel = vf.verify(ref, got)
+                max_rel, fro_rel = verify_outputs(ref, got)
                 del got
                 ok = vf.passed(max_rel, fro_rel)
                 failures += 0 if ok else 1
@@ -421,12 +488,12 @@ def main(argv=None):
             if opt.bench:
                 if opt.log_clocks or opt.min_power_limit > 0:
                     pre = gm.sample_gpu(selector)
-                w = warm_up(fn, (x, b), opt, selector)
+                w = warm_up(fn, args, opt, selector)
                 start = w["last"]
                 if opt.log_clocks and not start.valid:
                     start = gm.sample_gpu(selector)
-                t = (time_it(fn, (x, b), opt.reps) if opt.timing == "per-call"
-                     else time_pipeline(fn, (x, b), opt.reps))
+                t = (time_it(fn, args, opt.reps) if opt.timing == "per-call"
+                     else time_pipeline(fn, args, opt.reps))
                 if opt.log_clocks or opt.min_power_limit > 0:
                     end = gm.sample_gpu(selector)
             power_ok = (not opt.bench or opt.min_power_limit <= 0 or
@@ -439,10 +506,14 @@ def main(argv=None):
             bytes_min = op.bytes_per_element * rows * hidden
             eff = (bytes_min / (t["median"] * 1e-3) / 1e9) if t["median"] > 0 else 0.0
             pct = 100.0 * eff / roof if (roof and eff > 0) else -1.0
+            flops = op.flops(rows, hidden) if op.flops else 0
+            tflops = (flops / (t["median"] * 1e-3) / 1e12) if (flops and t["median"] > 0) else -1.0
             spread = (100.0 * (t["max"] - t["min"]) / t["median"]
                       if t["median"] > 0 else 0.0)
             print(f"{name:<16} {t['median']:>10.3f} {t['p10']:>9.3f} {t['p90']:>9.3f} "
-                  f"{eff:>9.1f} {(f'{pct:.1f}%' if pct >= 0 else '-'):>7} "
+                  f"{(f'{eff:.1f}' if bytes_min else '-'):>9} "
+                  f"{(f'{pct:.1f}%' if pct >= 0 else '-'):>7} "
+                  f"{(f'{tflops:.2f}' if tflops >= 0 else '-'):>8} "
                   f"{max_rel:>10.2e} {fro_rel:>10.2e}"
                   f"{'' if ok else '  << FAIL'}")
             if opt.bench:
@@ -474,7 +545,8 @@ def main(argv=None):
                     pv.fmt_num(w["range_pct"], ".2f"), opt.reps,
                     f"{t['median']:.6f}", f"{t['p10']:.6f}", f"{t['p90']:.6f}",
                     f"{t['min']:.6f}", f"{t['max']:.6f}", t["max_rep"],
-                    f"{spread:.2f}", bytes_min, f"{eff:.3f}", pv.fmt_num(pct, ".2f"),
+                    f"{spread:.2f}", bytes_min or "", f"{eff:.3f}" if bytes_min else "",
+                    pv.fmt_num(pct, ".2f"), flops or "", pv.fmt_num(tflops, ".4f"),
                     pv.fmt_int(pre.sm_mhz), pv.fmt_int(pre.temp_c),
                     pv.fmt_num(pre.power_w, ".2f"), pv.fmt_num(pre.power_limit_w, ".2f"),
                     pv.fmt_int(start.sm_mhz), pv.fmt_int(start.mem_mhz),
@@ -493,7 +565,7 @@ def main(argv=None):
                     pv.csv_safe(desc),
                 ])
                 csv_file.flush()
-        del x, b
+        del args
         torch.cuda.empty_cache()
 
     if csv_file:
