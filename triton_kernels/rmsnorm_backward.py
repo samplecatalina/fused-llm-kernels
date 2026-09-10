@@ -24,6 +24,8 @@ import triton.language as tl
 # 32768, minutes beyond. 32768 is the supported maximum.
 MAX_COLS = 32768
 EPS = 1e-6
+# Bounded search over 2, 4, 8, 16 at 4096x4096 (tuning_triton_rmsnorm_bwd.csv):
+# 4 was fastest; all four were within 3.1% of each other.
 DEFAULT_NUM_WARPS = 4
 # Programs are sized so that the partial-dw matrix stays small: with 24 SMs,
 # a few hundred programs keep every SM busy and the matrix under a megabyte.
