@@ -46,6 +46,7 @@ from . import gpu_monitor as gm
 from . import provenance as pv
 from . import rmsnorm as rn
 from . import rmsnorm_backward as rb
+from . import attention as at
 from . import softmax as sm
 from . import verify as vf
 
@@ -88,6 +89,7 @@ class Op:
     make_inputs: object = None  # (rows, hidden, gen) -> tuple of arguments
     flops: object = None        # (rows, hidden) -> FLOPs per call, or None
     labels: tuple = ("rows", "hidden")   # what the two shape numbers mean
+    tolerances: tuple = (vf.MAX_TOL, vf.FRO_TOL)   # max_rel, fro_rel
 
 
 def bias_silu_impls():
@@ -164,6 +166,49 @@ def rmsnorm_bwd_inputs(rows, hidden, gen):
     return x, w, dy
 
 
+ATTENTION_BATCH = 1
+ATTENTION_HEADS = 16
+
+
+def attention_impls():
+    from torch.nn.attention import SDPBackend, sdpa_kernel
+    import torch.nn.functional as F
+
+    def sdpa(backend):
+        def run(q, k, v):
+            with sdpa_kernel(backend):
+                return F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        return run
+
+    impls = {
+        "sdpa_math": ("scaled_dot_product_attention, math backend "
+                      "(materialises the seq x seq scores)",
+                      lambda: sdpa(SDPBackend.MATH), None),
+        "sdpa_flash": ("scaled_dot_product_attention, flash backend",
+                       lambda: sdpa(SDPBackend.FLASH_ATTENTION), None),
+        "triton": (f"Triton, one program per query block, "
+                   f"{at.DEFAULT_BM}x{at.DEFAULT_BN}", lambda: at.attention,
+                   at.DEFAULT_NUM_WARPS),
+    }
+    for bm, bn in ((64, 32), (64, 64), (128, 64), (128, 128)):
+        impls[f"triton_{bm}x{bn}"] = (
+            f"Triton, one program per query block, {bm}x{bn}",
+            lambda bm=bm, bn=bn: (lambda q, k, v: at.attention(q, k, v, bm=bm, bn=bn)),
+            at.DEFAULT_NUM_WARPS)
+    return impls
+
+
+def attention_inputs(seq, head_dim, gen):
+    shape = (ATTENTION_BATCH, ATTENTION_HEADS, seq, head_dim)
+    return tuple(((torch.rand(shape, generator=gen) * 2 - 1) * 0.5)
+                 .half().cuda() for _ in range(3))
+
+
+def attention_flops(seq, head_dim):
+    # Causal: about half the seq x seq pairs, two matmuls of 2 FLOP each.
+    return 2 * ATTENTION_BATCH * ATTENTION_HEADS * seq * seq * head_dim
+
+
 def softmax_impls():
     # Softmax has no per-column parameter: every callable ignores it.
     impls = {
@@ -219,6 +264,25 @@ OPS = {
                             (2, rb.MAX_COLS), (4096, 4096)],
         },
         bytes_per_element=12,  # read dy, read x, write dx
+    ),
+    "attention": Op(
+        impls=attention_impls,
+        reference=lambda q, k, v: at.reference(q, k, v).cpu().double(),
+        make_inputs=attention_inputs,
+        presets={
+            "main": [(s, 64) for s in (1024, 2048, 4096)] + [(2048, 128)],
+            "correctness": [(1, 64), (17, 64), (64, 64), (129, 64), (256, 128),
+                            (1000, 64), (1024, 128)],
+        },
+        flops=attention_flops,
+        labels=("seq", "head_dim"),
+        # FP16 outputs against an FP32 reference. The Frobenius bound is the
+        # real check (measured 2.4e-4). max_rel is only a guard here: the
+        # rounding of one FP16 output against a reference whose RMS falls as
+        # the sequence grows reaches 6.2e-2 at seq 4096 for PyTorch's flash
+        # backend as well, so a tight bound would fail every implementation.
+        # test_attention compares max_rel against the flash backend directly.
+        tolerances=(1e-1, 2e-3),
     ),
     "softmax": Op(
         impls=softmax_impls,
