@@ -541,7 +541,7 @@ def main(argv=None):
                 torch.cuda.synchronize()
                 max_rel, fro_rel = verify_outputs(ref, got)
                 del got
-                ok = vf.passed(max_rel, fro_rel)
+                ok = (max_rel < op.tolerances[0] and fro_rel < op.tolerances[1])
                 failures += 0 if ok else 1
 
             t = dict(median=0.0, p10=0.0, p90=0.0, min=0.0, max=0.0, max_rep=-1,
