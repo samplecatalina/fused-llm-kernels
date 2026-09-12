@@ -141,9 +141,13 @@ EAGER_KERNEL_RE_rmsnorm = pow_tensor|reduce_kernel|elementwise
 NATIVE_KERNEL_RE_rmsnorm = layer_norm
 EAGER_KERNEL_RE_softmax = reduce_kernel|elementwise
 EAGER_KERNEL_RE_rmsnorm_bwd = reduce_kernel|elementwise
+# Attention: the handwritten kernel is attn_fwd_kernel; SDPA's math backend
+# runs matmuls and a softmax, its flash backend one fused kernel.
+EAGER_KERNEL_RE_attention = gemm|softmax|elementwise
+NATIVE_KERNEL_RE_attention = flash|fmha
 NATIVE_KERNEL_RE_rmsnorm_bwd = layer_norm|LayerNorm
 NATIVE_KERNEL_RE_softmax = SoftMax|softmax_warp
-TRITON_KERNEL_RE = $(if $(filter compile,$(IMPL)),triton_,$(if $(filter eager%,$(IMPL)),$(EAGER_KERNEL_RE_$(TRITON_OP)),$(if $(filter native,$(IMPL)),$(NATIVE_KERNEL_RE_$(TRITON_OP)),$(TRITON_OP)_kernel)))
+TRITON_KERNEL_RE = $(strip $(if $(filter compile,$(IMPL)),triton_,$(if $(filter eager% sdpa_math,$(IMPL)),$(EAGER_KERNEL_RE_$(TRITON_OP)),$(if $(filter native sdpa_flash,$(IMPL)),$(NATIVE_KERNEL_RE_$(TRITON_OP)),$(if $(filter attention,$(TRITON_OP)),attn_fwd_kernel,$(TRITON_OP)_kernel)))))
 triton-profile:
 	@mkdir -p $(REPORTS)
 	@set -o pipefail; \
