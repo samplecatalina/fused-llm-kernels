@@ -16,10 +16,16 @@
 //                                                      memory-bound region
 //   fma_f4    x = x*a + b in registers, four lanes     compute roof
 //   fma_f1    the same with one lane                   compute, scalar
+//   gemm_f16  cuBLAS FP16 GEMM, FP32 accumulate         tensor-core roof,
+//                                                       the ceiling the
+//                                                       attention kernel is
+//                                                       reported against
 //
 // Traffic is counted as bytes loaded plus bytes stored. FLOPs count every
 // scalar multiply and add.
 #include <algorithm>
+#include <cuda_fp16.h>
+
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -46,6 +52,10 @@ constexpr int kFmaThreads = 64 * kThreadsPerBlock;
 // lasts only 3 to 11 ms.
 constexpr int kFmaItersDefault = 262144;
 int g_fma_iters = kFmaItersDefault;
+// FP16 GEMM size. Throughput still rises with N here (21.5 TFLOP/s at 2048,
+// 28.1 at 4096); 8192 is the largest square that fits alongside the other
+// buffers in 8 GB and is where it flattens.
+constexpr int kGemmN = 8192;
 
 dim3 grid_for(int threads) {
   return dim3((threads + kThreadsPerBlock - 1) / kThreadsPerBlock);
@@ -126,9 +136,34 @@ struct Buffers {
   float* z = nullptr;  // c
 };
 
+// FP16 operands with FP32 accumulation: what a tensor-core matmul does, and
+// what the attention kernel's dots do.
+struct GemmBuffers {
+  __half* a = nullptr;
+  __half* b = nullptr;
+  __half* c = nullptr;
+  cublasHandle_t handle = nullptr;
+};
+
+GemmBuffers g_gemm;
+
+void run_gemm_f16() {
+  const float alpha = 1.0f, beta = 0.0f;
+  CUBLAS_CHECK(cublasGemmEx(g_gemm.handle, CUBLAS_OP_N, CUBLAS_OP_N, kGemmN,
+                            kGemmN, kGemmN, &alpha, g_gemm.a, CUDA_R_16F,
+                            kGemmN, g_gemm.b, CUDA_R_16F, kGemmN, &beta,
+                            g_gemm.c, CUDA_R_16F, kGemmN, CUBLAS_COMPUTE_32F,
+                            CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+}
+
 void run_once(const std::string& name, const Buffers& d) {
   const int n4 = kMemElems / 4;
   dim3 block(kThreadsPerBlock);
+  if (name == "gemm_f16") {
+    run_gemm_f16();
+    CUDA_CHECK(cudaDeviceSynchronize());
+    return;
+  }
   if (name == "copy_f4") {
     copy_f4_kernel<<<grid_for(n4), block>>>(d.x, d.y, n4);
   } else if (name == "copy_f1") {
@@ -154,6 +189,12 @@ Bench describe(const std::string& name) {
   if (name == "triad_f4")
     return {nullptr, 3.0 * kMemElems * f, 2.0 * kMemElems, kMemElems,
             kMemElems / 4, 0};
+  if (name == "gemm_f16") {
+    const double n = kGemmN;
+    // Two FP16 reads and one FP16 write of an n x n matrix; 2 n^3 FLOPs.
+    return {nullptr, 3.0 * n * n * 2.0, 2.0 * n * n * n,
+            static_cast<long long>(n * n), 0, 0};
+  }
   const double lanes = (name == "fma_f4") ? 4.0 : 1.0;
   // one load and one store of a float4 per thread
   return {nullptr, 2.0 * kFmaThreads * 16.0,
@@ -182,7 +223,8 @@ void usage() {
   std::printf(
       "usage: roofline [options]\n"
       "  --bench <list>          comma separated from copy_f4,copy_f1,triad_f4,\n"
-      "                          fma_f4,fma_f1; default all\n"
+      "                          fma_f4,fma_f1,gemm_f16; default all but\n"
+      "                          gemm_f16\n"
       "  --reps N                default 100\n"
       "  --fma-iters N           iterations per thread in fma_*, default 262144\n"
       "  --warmup-seconds S      load for >= S s, then until the SM clock\n"
@@ -230,7 +272,8 @@ int main(int argc, char** argv) {
   }
   if (benches.empty()) benches = {"copy_f4", "copy_f1", "triad_f4", "fma_f4", "fma_f1"};
   for (const auto& b : benches) {
-    if (b != "copy_f4" && b != "copy_f1" && b != "triad_f4" && b != "fma_f4" && b != "fma_f1") {
+    if (b != "copy_f4" && b != "copy_f1" && b != "triad_f4" && b != "fma_f4" &&
+        b != "fma_f1" && b != "gemm_f16") {
       std::fprintf(stderr, "unknown bench: %s\n", b.c_str());
       return 2;
     }
@@ -282,6 +325,25 @@ int main(int argc, char** argv) {
     fma.x = device_alloc(seeds.size());
     fma.y = device_alloc(seeds.size());
     host_to_device(fma.x, seeds);
+  }
+
+  const bool want_gemm =
+      std::find(benches.begin(), benches.end(), "gemm_f16") != benches.end();
+  if (want_gemm) {
+    const size_t n2 = static_cast<size_t>(kGemmN) * kGemmN;
+    std::vector<__half> h(n2);
+    std::mt19937 gen(7);
+    std::uniform_real_distribution<float> u(-1.0f, 1.0f);
+    CUDA_CHECK(cudaMalloc(&g_gemm.a, n2 * sizeof(__half)));
+    CUDA_CHECK(cudaMalloc(&g_gemm.b, n2 * sizeof(__half)));
+    CUDA_CHECK(cudaMalloc(&g_gemm.c, n2 * sizeof(__half)));
+    for (auto& v : h) v = __float2half(u(gen));
+    CUDA_CHECK(cudaMemcpy(g_gemm.a, h.data(), n2 * sizeof(__half),
+                          cudaMemcpyHostToDevice));
+    for (auto& v : h) v = __float2half(u(gen));
+    CUDA_CHECK(cudaMemcpy(g_gemm.b, h.data(), n2 * sizeof(__half),
+                          cudaMemcpyHostToDevice));
+    CUBLAS_CHECK(cublasCreate(&g_gemm.handle));
   }
 
   FILE* csv = nullptr;
@@ -376,5 +438,9 @@ int main(int argc, char** argv) {
   }
   if (csv) std::fclose(csv);
   for (float* p : {mem.x, mem.y, mem.z, fma.x, fma.y}) CUDA_CHECK(cudaFree(p));
+  if (g_gemm.handle) {
+    CUBLAS_CHECK(cublasDestroy(g_gemm.handle));
+    for (__half* p : {g_gemm.a, g_gemm.b, g_gemm.c}) CUDA_CHECK(cudaFree(p));
+  }
   return 0;
 }
