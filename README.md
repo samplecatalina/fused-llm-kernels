@@ -80,6 +80,11 @@ that passes `4097×513×129` is correct by construction rather than by luck.
   so they are only meaningful over timed regions of several seconds). It also records the device tag, the source revision
   and a UTC timestamp. The runner refuses to write CSV rows without these, and
   rows from kernels that fail the correctness check are never written.
+- The enforced GPU power limit is recorded too, and a benchmark refuses to start
+  (or to write its row) when the limit is below a per-device minimum. A laptop
+  GPU loses most of its power budget when the host leaves its high-performance
+  power plan, silently turning every later number into a measurement of a
+  different machine.
   Clocks cannot be locked from user space, so a speedup reported without the
   clock it was measured at is not a speedup.
 - Correctness is checked against cuBLAS under two tolerances that must both
