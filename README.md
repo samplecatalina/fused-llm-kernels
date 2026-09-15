@@ -16,8 +16,10 @@ right is the engineering around it:
 - **A roofline built from micro-benchmarks**, not from datasheet numbers.
 
 > **Status: in progress.** The harness, the cuBLAS baseline and the measurement
-> methodology are in place. `k1` is a stub, so `make test` currently fails on it
-> by design. The only measurement so far is the cuBLAS baseline on the
+> methodology are in place. K1-K3 are implemented and pass the correctness
+> check; their benchmark and profiling runs are pending, and predictions for
+> them are recorded in `docs/optimization-log.md` ahead of those runs. The
+> only measurement so far is the cuBLAS baseline on the
 > development GPU (`results/rtx4060-laptop/gemm_4096.csv`). This README will not
 > carry a number that cannot be traced to a row in `results/` or to a report in
 > `profiling/reports/`.
@@ -44,9 +46,9 @@ make profile K=k1              # ncu report -> profiling/reports/<device>/
 | Rung | What it adds | Bottleneck it targets | Status |
 |---|---|---|---|
 | K0 | cuBLAS baseline, timed through the same harness | - | done |
-| K1 | naive: one thread per element of C | uncoalesced global access | stub |
-| K2 | coalesced access (swap the thread-to-data mapping) | DRAM bandwidth | planned |
-| K3 | shared-memory tiling (BM×BK / BK×BN) | shared bandwidth, low compute ratio | planned |
+| K1 | naive: one thread per element of C | uncoalesced global access | implemented |
+| K2 | coalesced access (swap the thread-to-data mapping) | DRAM bandwidth | implemented |
+| K3 | shared-memory tiling (BM×BK / BK×BN) | shared bandwidth, low compute ratio | implemented |
 | K4 | 1D thread tiling (TM results per thread) | register reuse | planned |
 | K5 | 2D thread tiling (TM×TN register block) | instruction scheduling | planned |
 | K6 | float4 vectorized loads, transposed A tile | shared-memory bank conflicts | planned |
