@@ -98,3 +98,30 @@ selects the column instead of the row, and the grid dimensions swap with it.
 - **Measured**: pending.
 - **Difference**: pending.
 - **Evidence**: pending.
+
+## K3 - shared-memory tiling
+
+Keeps the coalesced mapping of K2 and adds one level of blocking: for every
+tile of 32 values of k, the block copies the matching 32x32 pieces of A and
+B into shared memory, and the inner products read only those copies. Each
+thread loads one cell of each shared array, which covers both only because
+the tile is square. Threads outside the matrix still load and synchronize;
+two synchronizations per tile keep loading and reading apart.
+
+- **Hypothesis**: after K2, every inner iteration still reads global memory,
+  and A and B are each larger than L2, so the kernel should be bound by DRAM
+  bandwidth. Reading global memory in batches moves that bound: a tile reads
+  8 KiB from DRAM and then performs 65,536 FLOPs on the shared copy, so DRAM
+  traffic per FLOP drops by more than an order of magnitude. The new limits
+  should be shared-memory bandwidth and the cost of 256 thread
+  synchronizations per block at `4096³`. MemoryWorkloadAnalysis should show
+  the DRAM share falling; SchedulerStats and WarpStateStats should show time
+  spent waiting at synchronization.
+- **Prediction**: 250 GFLOP/s (range 120-600), recorded before the first
+  benchmark run. The range is wide because shared-memory bandwidth on this
+  part has not been measured. If K3 is not faster than K2, synchronization or
+  shared-memory conflicts ate the gain; if it is more than 4x faster, K2 was
+  firmly bandwidth-bound, which the K2/K1 ratio should confirm independently.
+- **Measured**: pending.
+- **Difference**: pending.
+- **Evidence**: pending.
