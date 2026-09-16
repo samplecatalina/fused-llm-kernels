@@ -15,13 +15,11 @@ right is the engineering around it:
   and clock, power and clock-event state recorded with every result row.
 - **A roofline built from micro-benchmarks**, not from datasheet numbers.
 
-> **Status: in progress.** The harness, the cuBLAS baseline and the measurement
-> methodology are in place. K1-K5 are implemented and pass the correctness
-> check; their benchmark and profiling runs are pending, and predictions for
-> them are recorded in `docs/optimization-log.md` ahead of those runs. The
-> only measurement so far is the cuBLAS baseline on the
-> development GPU (`results/rtx4060-laptop/gemm_4096.csv`). This README will not
-> carry a number that cannot be traced to a row in `results/` or to a report in
+> **Status: in progress.** K1-K5 are implemented, measured and profiled;
+> K6-K8 are not written yet. Every rung's prediction was recorded in
+> `docs/optimization-log.md` before its benchmark ran, and the log states
+> which predictions the measurements falsified. This README will not carry a
+> number that cannot be traced to a row in `results/` or to a report in
 > `profiling/reports/`.
 
 ## Quick start
@@ -43,14 +41,27 @@ make profile K=k1              # ncu report -> profiling/reports/<device>/
 
 ## The ladder
 
+Measured at `4096³` in one run on an RTX 4060 Laptop GPU, every rung against
+the same cuBLAS baseline (`results/rtx4060-laptop/gemm_4096.csv`, rows 2-7):
+
+| Rung | What it adds | Bottleneck left for the next rung | GFLOP/s | % of cuBLAS | vs previous |
+|---|---|---|---|---|---|
+| K0 | cuBLAS baseline, timed through the same harness | - | 9115.1 | 100% | - |
+| K1 | naive: one thread per element of C | uncoalesced global access | 115.8 | 1.3% | - |
+| K2 | coalesced access (swap the thread-to-data mapping) | DRAM bandwidth | 845.5 | 9.3% | 7.30x |
+| K3 | shared-memory tiling (BM×BK / BK×BN) | shared bandwidth, low compute ratio | 757.6 | 8.3% | **0.90x** |
+| K4 | 1D thread tiling (TM results per thread) | register reuse | 1541.4 | 16.9% | 2.03x |
+| K5 | 2D thread tiling (TM×TN register block) | instruction scheduling | 4062.9 | 44.6% | 2.64x |
+
+K3 is slower than K2, and the profile says why: K2 was already served out of
+L1 at a 94.98% hit rate, so moving the same data into shared memory by hand
+replaced a free cache with an explicit copy and two barriers per tile. The
+optimization log carries the full reading.
+
+Rungs not yet written:
+
 | Rung | What it adds | Bottleneck it targets | Status |
 |---|---|---|---|
-| K0 | cuBLAS baseline, timed through the same harness | - | done |
-| K1 | naive: one thread per element of C | uncoalesced global access | implemented |
-| K2 | coalesced access (swap the thread-to-data mapping) | DRAM bandwidth | implemented |
-| K3 | shared-memory tiling (BM×BK / BK×BN) | shared bandwidth, low compute ratio | implemented |
-| K4 | 1D thread tiling (TM results per thread) | register reuse | implemented |
-| K5 | 2D thread tiling (TM×TN register block) | instruction scheduling | implemented |
 | K6 | float4 vectorized loads, transposed A tile | shared-memory bank conflicts | planned |
 | K7 | warp tiling (a second blocking level per warp) | scheduling efficiency | planned |
 | K8 | double buffering (optional) | latency hiding | optional |

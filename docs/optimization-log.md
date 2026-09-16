@@ -48,12 +48,16 @@ baseline has to see exactly the memory layout the kernels see, or the
 comparison is not fair. Also serves as the correctness reference for every
 other kernel.
 
-- **Measured**: 7151.8 GFLOP/s median at `4096³` (per-iteration p10/p90
-  18.44/19.82 ms; `results/rtx4060-laptop/gemm_4096.csv`, row 1). The spread
-  (max - min) / median is 11.7%: the GPU ran under SW power capping for the
-  whole timed region (939 ms of capping counted over 2.0 s) and its SM clock
-  dithered by 8.6% over the final warmup window, so the spread is clock
-  dither under a power cap rather than noise.
+- **Measured**: 9115.1 GFLOP/s median at `4096³` (p10/p90 14.99/15.58 ms,
+  spread 5.6%; `results/rtx4060-laptop/gemm_4096.csv`, row 2). Every other
+  number below is from the same run and is quoted against this baseline.
+- **Measured earlier, under half the power limit**: 7151.8 GFLOP/s (row 1,
+  spread 11.7%). That run sat under SW power capping for its whole timed
+  region (939 ms of capping over 2.0 s) with the SM clock dithering 8.6%
+  across the final warmup window; the later run had no capping at all and
+  0.0% dither. The rows are not comparable, which is why the power limit is
+  now recorded in every row - the older row predates the column and leaves it
+  empty. Power budget alone moved the baseline by 27%.
 
 ## K1 - naive
 
@@ -74,9 +78,20 @@ against.
   reach it. A result above 64 would mean many accesses never reach DRAM (the
   L2 hit rate should show it); below 20 would point at occupancy or launch
   overhead rather than bandwidth.
-- **Measured**: pending.
-- **Difference**: pending.
-- **Evidence**: pending.
+- **Measured**: 115.8 GFLOP/s, 1.27% of the cuBLAS baseline (1186.6 ms
+  median, spread 2.7%; row 3).
+- **Difference**: 2.6x above the predicted 45 and outside the predicted range.
+  The prediction assumed every inner iteration reaches DRAM, which would cap
+  the kernel at 64 GFLOP/s; measuring above that cap falsified the assumption
+  exactly the way the prediction said it would.
+- **Evidence** (`profiling/reports/rtx4060-laptop/k1_20260915_221324.details.csv`):
+  DRAM throughput is 5.29% of peak while the L1/TEX cache path sits at 99.07%
+  and its hit rate at 99.08%. The kernel is not bandwidth-bound at all; it is
+  bound by the number of memory requests. The uncoalesced mapping turns one
+  warp instruction into 32 separate sector requests, and each warp spends
+  210.3 cycles stalled on the queue for global memory instructions, with
+  226.2 warp cycles per issued instruction and no eligible warp 96.5% of the
+  time. Bytes were the wrong unit for this rung; requests were the right one.
 
 ## K2 - coalesced access
 
@@ -95,9 +110,17 @@ selects the column instead of the row, and the grid dimensions swap with it.
   measured K2/K1 ratio decides between them: at or below 2.5x the kernel is
   still bandwidth-bound; at or above 5x access coalescing dominates, and
   MemoryWorkloadAnalysis should show uncoalesced and DRAM accesses collapsing.
-- **Measured**: pending.
-- **Difference**: pending.
-- **Evidence**: pending.
+- **Measured**: 845.5 GFLOP/s, 9.28% of the baseline, **7.30x over K1**
+  (162.5 ms median, spread 1.4%; row 4).
+- **Difference**: above the predicted 150. Of the two competing models in the
+  prediction, the byte model (which expected at most 2.5x) is falsified and
+  the access-count model is confirmed.
+- **Evidence** (`k2_20260915_221400.details.csv`): stall cycles on the global
+  memory queue fall from 210.3 to 18.4 per warp and warp cycles per issued
+  instruction from 226.2 to 30.2, while DRAM throughput only rises from 5.3%
+  to 20.1% - the traffic in bytes barely changed, the number of requests
+  collapsed. Compute and memory now sit at the same 90.6% of peak, which the
+  profiler reports as a balanced workload.
 
 ## K3 - shared-memory tiling
 
@@ -122,9 +145,24 @@ two synchronizations per tile keep loading and reading apart.
   part has not been measured. If K3 is not faster than K2, synchronization or
   shared-memory conflicts ate the gain; if it is more than 4x faster, K2 was
   firmly bandwidth-bound, which the K2/K1 ratio should confirm independently.
-- **Measured**: pending.
-- **Difference**: pending.
-- **Evidence**: pending.
+- **Measured**: 757.6 GFLOP/s, 8.31% of the baseline, **0.90x of K2: this
+  rung is 10% slower than the one before it** (181.4 ms median; row 5).
+- **Difference**: the prediction's falsification clause fired - "if K3 is not
+  faster than K2, synchronization or shared-memory conflicts ate the gain".
+  The cause turned out to be more specific than that.
+- **Evidence** (`k3_20260915_221407.details.csv`): the L1/TEX hit rate drops
+  from 94.98% in K2 to **0.39%**. K2 was already being served almost entirely
+  out of L1: the hardware cache was doing, for free, what this rung does by
+  hand. Copying the same data into shared memory replaces those hits with an
+  explicit copy plus two block-wide barriers per tile, and moves the queue
+  pressure from the global-memory queue to the MIO queue (27.0 stall cycles
+  per warp). DRAM throughput does fall, 20.1% to 17.7%, so the tiling does
+  what it was supposed to do - there was simply nothing left to win, because
+  L1 had already won it. Occupancy is unchanged at 66.7%, and with 8.19 KB of
+  shared memory per 1024-thread block only one block fits per SM.
+  The lesson generalizes: a manual cache only pays once the automatic one
+  stops working, which is why the next rung keeps the tiles and changes what
+  each thread does with them.
 
 ## K4 - 1D thread tiling
 
@@ -145,9 +183,17 @@ it for all 8 results.
   are too few to keep the SMs occupied (Occupancy's block limits should show
   it); if it is more than 3x faster, K3 was bound by thread scheduling rather
   than by shared-memory bandwidth.
-- **Measured**: pending.
-- **Difference**: pending.
-- **Evidence**: pending.
+- **Measured**: 1541.4 GFLOP/s, 16.91% of the baseline, **2.03x over K3**
+  (89.2 ms median; row 6).
+- **Difference**: inside the predicted range of 200-1100 - the only rung whose
+  absolute prediction held - and the measured 2.03x matches the predicted 1.8x
+  ratio. This is also the rung whose gain could be computed in advance from
+  traffic alone, without knowing which cache would catch what.
+- **Evidence** (`k4_20260915_221414.details.csv`): achieved occupancy rises
+  from 66.7% to 82.8% (128-thread blocks at 48 registers per thread allow 10
+  blocks per SM instead of one), compute and memory both reach 98.0% of peak,
+  and effective memory throughput rises from 45.1 to 81.3 GB/s. Stall cycles
+  on the MIO queue fall from 27.0 to 23.6 per warp.
 
 ## K5 - 2D thread tiling
 
@@ -176,6 +222,20 @@ to separate.
   60% of cuBLAS, the earlier estimate was right. If K5 is within 10% of K4,
   register or occupancy limits cancelled the 2D split, or the tile change
   cost something, which Occupancy and LaunchStats should separate.
-- **Measured**: pending.
-- **Difference**: pending.
-- **Evidence**: pending.
+- **Measured**: 4062.9 GFLOP/s, **44.57% of the cuBLAS baseline**, 2.64x over
+  K4 (33.8 ms median; row 7).
+- **Difference**: above the predicted range of 350-2000, and the ratio 2.64x
+  is above the predicted 1.7x. The absolute prediction chain was too low at
+  every rung because its first link assumed K1 was DRAM-bound; the profile
+  showed it was request-bound instead, and every later prediction inherited
+  the error. The rung-to-rung ratios held up better than the absolute values:
+  2.03x predicted 1.8x for K4, while K2 and K5 both beat their predicted
+  ratios and K3 went the other way entirely.
+- **Evidence** (`k5_20260915_221418.details.csv`): the bottleneck has moved.
+  Compute sits at 59.6% of peak while memory sits at 96.4%, so the limit is
+  now the memory pipe feeding the registers, not the arithmetic. Warp cycles
+  per issued instruction fall from 36.3 to 10.4 and MIO stalls from 23.6 to
+  3.6 cycles. This happens despite occupancy halving to 33.0%: at 121
+  registers per thread only 2 blocks fit per SM, and the work per thread makes
+  up for the missing warps. Shared-memory traffic per FLOP is what the next
+  rung has to attack.
