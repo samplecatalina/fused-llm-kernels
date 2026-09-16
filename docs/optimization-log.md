@@ -48,11 +48,20 @@ baseline has to see exactly the memory layout the kernels see, or the
 comparison is not fair. Also serves as the correctness reference for every
 other kernel.
 
-- **Measured**: 9115.1 GFLOP/s median at `4096³` (p10/p90 14.99/15.58 ms,
-  spread 5.6%; `results/rtx4060-laptop/gemm_4096.csv`, row 2). Every other
-  number below is from the same run and is quoted against this baseline.
-- **Measured earlier, under half the power limit**: 7151.8 GFLOP/s (row 1,
-  spread 11.7%). That run sat under SW power capping for its whole timed
+- **Measured**: the baseline was re-established across four independent runs
+  once the host power configuration was corrected (rows 2, 8, 9, 10): 9115.1,
+  9045.0, 9010.9 and 8918.5 GFLOP/s, a **median of 9028.0 with a 2.18%
+  run-to-run range**. The four runs fall monotonically as the part heats
+  (75 to 82 C, settled SM clock 2415 down to 2346 MHz), so back-to-back runs
+  drift downward and a baseline has to be quoted as a median with its
+  run-to-run range rather than as a single number. Note that within one run
+  the per-iteration spread (5.6% to 16.4%) is larger than the spread between
+  runs.
+- Each rung below is quoted against the cuBLAS run inside its own benchmark
+  (9115.1 GFLOP/s, row 2), which is what the `pct_cublas` column records;
+  those percentages carry the 2.2% baseline uncertainty.
+- **Measured earlier, under a misconfigured host power setting**: 7151.8
+  GFLOP/s (row 1, spread 11.7%), 26.2% below the corrected baseline. That run sat under SW power capping for its whole timed
   region (939 ms of capping over 2.0 s) with the SM clock dithering 8.6%
   across the final warmup window; the later run had no capping at all and
   0.0% dither. The rows are not comparable, which is why the power limit is

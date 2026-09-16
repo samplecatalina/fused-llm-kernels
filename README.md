@@ -42,7 +42,8 @@ make profile K=k1              # ncu report -> profiling/reports/<device>/
 ## The ladder
 
 Measured at `4096³` in one run on an RTX 4060 Laptop GPU, every rung against
-the same cuBLAS baseline (`results/rtx4060-laptop/gemm_4096.csv`, rows 2-7):
+the cuBLAS run inside the same benchmark (`results/rtx4060-laptop/gemm_4096.csv`,
+rows 2-7):
 
 | Rung | What it adds | Bottleneck left for the next rung | GFLOP/s | % of cuBLAS | vs previous |
 |---|---|---|---|---|---|
@@ -52,6 +53,13 @@ the same cuBLAS baseline (`results/rtx4060-laptop/gemm_4096.csv`, rows 2-7):
 | K3 | shared-memory tiling (BM×BK / BK×BN) | shared bandwidth, low compute ratio | 757.6 | 8.3% | **0.90x** |
 | K4 | 1D thread tiling (TM results per thread) | register reuse | 1541.4 | 16.9% | 2.03x |
 | K5 | 2D thread tiling (TM×TN register block) | instruction scheduling | 4062.9 | 44.6% | 2.64x |
+
+The baseline itself was measured four times (rows 2, 8, 9, 10): 9115.1,
+9045.0, 9010.9, 8918.5 GFLOP/s - a median of 9028.0 with a 2.18% run-to-run
+range, falling monotonically as the part heats from 75 to 82 C and its settled
+clock drops from 2415 to 2346 MHz. Percentages above carry that uncertainty.
+An earlier baseline taken with the host power configuration set wrong came out
+26.2% lower, which is why the enforced power limit is recorded in every row.
 
 K3 is slower than K2, and the profile says why: K2 was already served out of
 L1 at a 94.98% hit rate, so moving the same data into shared memory by hand
