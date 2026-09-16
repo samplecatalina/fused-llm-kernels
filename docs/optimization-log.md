@@ -6,7 +6,7 @@ the two disagree. The prediction is written first, on purpose: a number without
 a prediction to compare it against teaches nothing about the hardware.
 
 Every number here traces to a row in `results/` or to a report in
-`profiling/reports/`. Entries with placeholders are not yet measured.
+`profiling/reports/`. Entries marked pending have not been measured yet.
 
 Entry template:
 
