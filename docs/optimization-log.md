@@ -125,3 +125,26 @@ two synchronizations per tile keep loading and reading apart.
 - **Measured**: pending.
 - **Difference**: pending.
 - **Evidence**: pending.
+
+## K4 - 1D thread tiling
+
+Same 32x32x32 shared-memory tiles as K3. Each thread owns 8 consecutive rows
+in one column of C: a block runs 32x4 threads instead of 32x32, and for
+every k the thread reads the shared B value into a register once and reuses
+it for all 8 results.
+
+- **Hypothesis**: K3 still runs one thread per result, and for every k the 8
+  results stacked in a column each re-read the same shared value of B. Reading
+  it once cuts shared-memory traffic per FLOP from 4 to 2.25 bytes, and an
+  eighth of the threads doing eight times the work dilutes per-thread
+  scheduling and synchronization overhead. What remains is the A side, which
+  is still read once per result.
+- **Prediction**: 450 GFLOP/s (range 200-1100), recorded before the first
+  benchmark run: roughly 1.8x the K3 prediction from the traffic reduction,
+  plus the diluted overhead. If K4 is not faster than K3, four warps per block
+  are too few to keep the SMs occupied (Occupancy's block limits should show
+  it); if it is more than 3x faster, K3 was bound by thread scheduling rather
+  than by shared-memory bandwidth.
+- **Measured**: pending.
+- **Difference**: pending.
+- **Evidence**: pending.
