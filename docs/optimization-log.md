@@ -37,8 +37,8 @@ Measured by `scripts/env_check.sh` on 2026-08-25.
 
 This is the **mobile** part, not the desktop 4060: the power budget floats and
 the clocks are unstable, so datasheet throughput and bandwidth figures are not
-usable as roofline ceilings. Both ceilings will be measured with
-micro-benchmarks instead.
+usable as roofline ceilings. Both ceilings were subsequently measured with
+micro-benchmarks; see the Roofline section and `results/rtx4060-laptop/roofline.csv`.
 
 ## K0 - cuBLAS baseline
 
@@ -342,7 +342,8 @@ isolates the warp-level blocking from the tuning.
   more than pay for slower ones.
 - **Where the limit is now**: compute 67.2%, memory 75.2%, still neither
   saturated, with occupancy bounded by registers and shared memory. 88.04%
-  leaves 1.075x before 95% of cuBLAS, the practical ceiling for this ladder.
+  leaves 1.075x before the historical prediction target of 95% of cuBLAS.
+  That target is an unverified assumption, not a measured ceiling.
 - **Measurement note**: an earlier run of this configuration, taken after
   hours of back-to-back benchmarks with the part at 80-85 C, came out 8%
   lower. Three runs after a cooldown agree within 0.57%; that run is not used.

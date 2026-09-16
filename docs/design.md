@@ -22,13 +22,13 @@ Concretely:
   a possible side branch once the ladder is finished; it is a different
   baseline, not another rung.
 - No CUTLASS-level generality (arbitrary layouts and epilogues).
-- No Hopper-specific features - no access to the hardware.
+- No Hopper-specific features on the portable FP32 main line.
 - No attempt to beat cuBLAS.
 
 **Definition of done.** `make test && make bench` reproduces every published
 number from a clean checkout; every kernel has an archived ncu report; the
 README carries a GFLOP/s ladder chart, a measured roofline, and one paragraph
-per rung explaining why it is faster.
+per rung explaining its measured gain or regression.
 
 ## 2. Requirements and constraints
 
@@ -70,54 +70,77 @@ Environment constraint: clocks cannot be locked on this consumer part
 (`nvidia-smi -lgc` is unavailable, and on the mobile part even `power.limit` is
 not readable). This is mitigated rather than solved: time-based warmups, a per-
 iteration distribution instead of an average, and the actual clock recorded
-alongside every row of results.
+alongside every row of results. `enforced.power.limit` is readable and checked.
+
+The device baseline is the median of repeated independent cuBLAS runs, with
+the run-to-run range recorded separately from each run's p10/p90. Headline
+runs cool down for at least 120 seconds first. Every CSV row records
+`source_rev`, `kernel_desc`, and `baseline_check`. Uncommitted source is
+rejected; an out-of-band cuBLAS baseline is flagged, so that run is used only
+for comparisons within the run, not as a headline result.
 
 ## 3. The GEMM ladder
 
-| Rung | Content | Expected bottleneck shift |
+K1-K7 are implemented and measured. The evidence below is detailed in
+[the optimization log](optimization-log.md), with source CSVs under
+`results/rtx4060-laptop/` and counters under `profiling/reports/rtx4060-laptop/`.
+
+| Rung | Implemented change | Observed limit or tradeoff |
 |---|---|---|
-| K0 | cuBLAS baseline, timed through the same harness | - |
-| K1 | naive: one thread per element of C | uncoalesced global access |
-| K2 | coalesced access (swap the thread index mapping) | DRAM bandwidth |
-| K3 | shared-memory tiling (BM×BK / BK×BN) | shared bandwidth, compute ratio too low |
-| K4 | 1D thread tiling (TM results per thread) | insufficient register reuse |
-| K5 | 2D thread tiling (TM×TN register block) | instruction scheduling |
-| K6 | float4 vectorized loads + transposed A tile | shared-memory bank conflicts |
-| K7 | warp tiling (a second blocking level per warp) | scheduling efficiency |
-| K8 | double buffering / shared prefetch pipeline (optional) | latency hiding |
+| K0 | cuBLAS reference | Device and temperature dependent baseline |
+| K1 | One thread per C element, scattered access | L1/TEX request path saturates despite low DRAM throughput |
+| K2 | Coalesced access | Request pressure falls; DRAM bandwidth is not saturated |
+| K3 | Shared-memory tiles | Manual caching costs more than the L1 reuse it replaces |
+| K4 | 1D thread tiles | More resident blocks and reuse improve throughput |
+| K5 | 2D register tiles | Memory path saturates; register use limits occupancy |
+| K6 | float4 loads and transposed A tile | Fewer instructions, but limited parallelism |
+| K7 | Warp tiles and parameter search | Smaller tiles improve occupancy at the cost of reuse |
+| K8 | Planned double buffering and register prefetch | Test latency hiding against added shared memory and register use |
 
-Starting parameters: `BM = BN = 128`, `BK = 8..16`, `TM = TN = 8`. From K7 on,
-a small scripted grid search over `(BM, BN, BK, TM, TN, WM, WN)`; results go to
-CSV, and the README reports the best configuration together with the search
-range that produced it.
+K3/K4 use 32-cubed tiles. In K4 a 128-by-128 output tile would need too
+many threads with only 1D thread tiling. K5/K6 use 128-by-128-by-16 tiles
+with 8-by-8 results per thread. K7's search selects 128-by-64-by-16,
+8-by-4 results per thread, and 32-by-32 warp tiles.
 
-Boundary handling uses guard branches rather than padding, so correctness holds
-for any `M, N, K`.
+**Negative result: K3.** Explicit shared-memory staging regresses relative
+to K2. The profiles show that K2 already benefits from high L1 hit rates;
+extra staging and synchronization do not pay for themselves. A completed
+rung can be slower than its predecessor.
 
-Every rung is checked on three shapes - `4096³` (the headline), `4097×513×129`
-(non-divisible), `64³` (small enough that launch overhead dominates) - against
-K0. Reported as `GFLOP/s = 2·M·N·K / t`, plus a 512→8192 sweep. With 32 MB of
-L2 on this part, the sweep is expected to show a knee where the combined
-footprint of A and B crosses the L2 capacity.
+**Separate structure from tuning: K7.** The `k7c1` control keeps K6's tile
+and thread count and changes only warp mapping. That change alone regresses;
+the selected smaller tile supplies the gain. Search results are preserved in
+`tuning_k7.csv`, rather than attributing the entire speedup to warp tiling.
+
+Boundary handling uses guards rather than padding. Every registered
+configuration is checked at `4096³`, `4097×513×129`, and `64³` against cuBLAS.
+Reported throughput is `2*M*N*K/time`; the size sweep covers 512 through 8192.
 
 ## 4. Profiling and roofline
 
-At least one ncu collection per rung, over these sections: SpeedOfLight,
-MemoryWorkloadAnalysis, Occupancy, SchedulerStats, WarpStateStats. The "why is
-it faster" paragraph for each rung must cite the corresponding measurement;
-theory alone does not count.
+Every measured rung has an ncu export covering SpeedOfLight,
+MemoryWorkloadAnalysis, Occupancy, SchedulerStats, WarpStateStats and
+LaunchStats. Counters explain throughput; profiler durations are not used
+as headline benchmark timings.
 
-**Roofline ceilings are measured, not quoted** (`make roofline`): a float4
-copy over 256 MiB arrays for achievable bandwidth (200.6 GB/s on the
-development GPU), a register-only FMA loop for sustained FP32 compute (12.63
-TFLOP/s), and a triad as a check that sits on the slanted roof. The earlier
-plan follows. A triad/copy micro-benchmark
-for achievable DRAM bandwidth, an FMA saturation micro-benchmark for achievable
-FP32 throughput, and the ridge point computed from those two. The reason is
-specific to this machine: the mobile 4060's power budget and clocks move with
-temperature, so datasheet figures would shift the entire plot. The README will
-state that the ceilings are locally measured and will ship the micro-benchmark
-code alongside them.
+The ceilings are measured with `make roofline`: **200.6 GB/s** from `copy_f4`
+and **12.63 TFLOP/s** from `fma_f4`, meeting at **63.0 FLOP/byte**
+([source CSV](../results/rtx4060-laptop/roofline.csv)). The copy uses 256 MiB
+arrays; the FMA loop uses 262144 iterations per thread after testing for a
+throughput plateau. These are achieved micro-benchmark rates, not universal
+upper bounds. K7 reaches 73.9% of the roof at its measured intensity; see
+the Roofline section of the optimization log for all rung positions.
+
+Arithmetic intensity uses the duration and DRAM throughput from the same
+ncu report. The ideal one-read-per-input traffic estimate does not describe
+the actual DRAM traffic of every implementation. Each device needs its own
+measured ceilings.
+
+The K2 size sweep shows a transition at 2880-3072, consistent with **one
+matrix** filling L2 (`4*N*N` bytes, N approximately 2896), rather than the
+original A+B hypothesis at 2048. The descending pass and L2 counters support
+this interpretation; data are in `gemm_sweep.csv`. K0 and K7 show no analogous
+knee in that sweep.
 
 ## 5. Triton operators
 

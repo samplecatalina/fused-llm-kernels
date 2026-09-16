@@ -41,9 +41,9 @@ make profile K=k1              # ncu report -> profiling/reports/<device>/
 
 ## The ladder
 
-Measured at `4096³` in one run on an RTX 4060 Laptop GPU, every rung against
-the cuBLAS run inside the same benchmark (`results/rtx4060-laptop/gemm_4096.csv`,
-rows 2-7):
+Measured at `4096³` on an RTX 4060 Laptop GPU. K1-K5 share one run;
+K6-K7 summarize three later runs. Each percentage uses the cuBLAS measurement
+from its own run (`results/rtx4060-laptop/gemm_4096.csv`).
 
 | Rung | What it adds | Bottleneck left for the next rung | GFLOP/s | % of cuBLAS | vs previous |
 |---|---|---|---|---|---|
@@ -106,7 +106,8 @@ Rungs not yet written:
 | K8 | double buffering (optional) | latency hiding | optional |
 
 Boundary handling is done with guard branches rather than padding, so a kernel
-that passes `4097×513×129` is correct by construction rather than by luck.
+is tested on `4097×513×129` as well as divisible shapes. Passing these tests
+is evidence for boundary handling, not a proof for every possible input.
 
 ## Measurement
 
@@ -164,8 +165,8 @@ that passes `4097×513×129` is correct by construction rather than by luck.
 
 Peak FP32 throughput and peak achievable bandwidth are deliberately **not**
 taken from the datasheet: this is the mobile part, whose clocks and power
-budget move with temperature. Both roofline ceilings will be measured with
-micro-benchmarks before any roofline plot is published.
+budget move with temperature. Both roofline ceilings have been measured with
+the micro-benchmarks in `csrc/roofline/`; see `results/rtx4060-laptop/roofline.csv`.
 
 Profiling under WSL2 requires GPU performance counters to be opened up on the
 Windows host: NVIDIA Control Panel → Developer → Manage GPU Performance
