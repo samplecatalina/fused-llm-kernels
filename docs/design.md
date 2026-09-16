@@ -49,6 +49,17 @@ failure mode the other catches - `max_rel` is inflated by elements near zero,
 while `fro_rel` averages away the handful of badly wrong elements that a
 boundary bug actually produces.
 
+`max_rel` divides by `|ref|` plus a floor of 5% of the RMS of the reference.
+A fixed absolute floor rejects correct kernels: two implementations that sum
+in a different order differ by rounding of up to about 2e-6 of the RMS, and on
+an element that happens to be near zero that reads as a large relative error.
+cuBLAS switches to a differently ordered kernel below 2048, and with a fixed
+1e-5 floor every kernel in this repository failed at 1024^3 while matching
+each other bit for bit. On synthetic 4096^2-element matrices the 5% floor
+keeps rounding noise 5x under the tolerance at every size (a 1% floor left
+only 1.1x), and a single wrong A*B term is still rejected - by 1.5x in the
+worst case, on the largest element of an 8192^3 result.
+
 Benchmarking: CUDA events, time-based warmup (at least 30 s, then until the SM
 clock settles), ≥ 100 repetitions, timed per iteration, reported as median with
 p10/p90. Clock, power and clock-event state are recorded before warmup, at the

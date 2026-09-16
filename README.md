@@ -117,7 +117,12 @@ that passes `4097×513×129` is correct by construction rather than by luck.
   clock it was measured at is not a speedup.
 - Correctness is checked against cuBLAS under two tolerances that must both
   hold: element-wise relative error < 1e-3 **and** relative Frobenius error
-  < 1e-5. Neither catches what the other misses.
+  < 1e-5. Neither catches what the other misses. The element-wise check uses a
+  floor of 5% of the reference RMS, so rounding differences on near-zero
+  elements are not mistaken for bugs.
+- Benchmark rows are refused when the code that produced them is not
+  committed, carry the kernel's configuration, and are flagged when the cuBLAS
+  run inside the same benchmark falls outside its run-to-run band.
 - Benchmarks are only valid on AC power, with the host power plan set to high
   performance and no other GPU load running.
 
