@@ -15,8 +15,8 @@ right is the engineering around it:
   and clock, power and clock-event state recorded with every result row.
 - **A roofline built from micro-benchmarks**, not from datasheet numbers.
 
-> **Status: in progress.** K1-K6 are implemented, measured and profiled;
-> K7-K8 are not written yet. Every rung's prediction was recorded in
+> **Status: in progress.** K1-K7 are implemented, measured and profiled; K7
+> reaches 88.0% of cuBLAS. K8 is not written yet. Every rung's prediction was recorded in
 > `docs/optimization-log.md` before its benchmark ran, and the log states
 > which predictions the measurements falsified. This README will not carry a
 > number that cannot be traced to a row in `results/` or to a report in
@@ -54,6 +54,7 @@ rows 2-7):
 | K4 | 1D thread tiling (TM results per thread) | register reuse | 1541.4 | 16.9% | 2.03x |
 | K5 | 2D thread tiling (TM×TN register block) | instruction scheduling | 4062.9 | 44.6% | 2.64x |
 | K6 | float4 vectorized loads, transposed A tile | latency and parallelism | 6902.8 | 76.8% | 1.71x |
+| K7 | warp tiling + parameter search (128×64×16, 8×4) | occupancy bounded by registers and shared memory | 8041.9 | 88.0% | 1.16x |
 
 The baseline itself was measured four times (rows 2, 8, 9, 10): 9115.1,
 9045.0, 9010.9, 8918.5 GFLOP/s - a median of 9028.0 with a 2.18% run-to-run
@@ -64,7 +65,10 @@ An earlier baseline taken with the host power configuration set wrong came out
 
 K6 was measured in its own run alongside K0 and K5 (cuBLAS 8986.2 GFLOP/s
 there, within the 2.2% run-to-run band); its ratio and percentage are quoted
-against that run.
+against that run. K7 is the median of three runs after a cooldown, each
+alongside K0 and K6 (0.57% range); its 1.16x over K6 comes from the parameter
+search, not from warp tiling itself - with K6's geometry, warp tiling alone
+runs at about 0.96x (`results/rtx4060-laptop/tuning_k7.csv`).
 
 K3 is slower than K2, and the profile says why: K2 was already served out of
 L1 at a 94.98% hit rate, so moving the same data into shared memory by hand
@@ -75,7 +79,6 @@ Rungs not yet written:
 
 | Rung | What it adds | Bottleneck it targets | Status |
 |---|---|---|---|
-| K7 | warp tiling (a second blocking level per warp) | scheduling efficiency | planned |
 | K8 | double buffering (optional) | latency hiding | optional |
 
 Boundary handling is done with guard branches rather than padding, so a kernel

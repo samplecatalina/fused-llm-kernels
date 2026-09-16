@@ -289,3 +289,55 @@ otherwise the loads fall back to element at a time, which is what the
   saturated, occupancy 33.16% with 107 registers per thread allowing two
   blocks per SM. The limit has moved from a saturated pipe to latency and
   parallelism.
+
+## K7 - warp tiling and a parameter search
+
+A blocking level between the block tile and the per-thread register block:
+each warp owns a WM x WN sub-tile and its 32 threads cover it exactly. The
+kernel is a template over (BM, BN, BK, TM, TN, WM, WN) with the constraints
+between them as static assertions, and `make tune` measures nine
+configurations in one run. `k7` is the configuration the search selected;
+`k7c1` keeps K6's tile and thread count exactly, so K6 against `k7c1`
+isolates the warp-level blocking from the tuning.
+
+- **Hypothesis**: after K6 neither the compute nor the memory side is
+  saturated (56.5% and 71.4%), while occupancy sits at 33% with 107
+  registers per thread and two blocks per SM. The limit is latency and
+  parallelism, not a saturated pipe. Warp tiling shrinks the shared-memory
+  footprint of a warp from 144 locations per k to 96; smaller tiles would
+  need fewer registers per thread and fit more blocks on an SM.
+- **Prediction**, recorded before any K7 run: warp tiling alone 1.10x over K6;
+  the best searched configuration 8300 GFLOP/s (range 7600-8577); and the
+  winner would be one of the smaller-tile configurations. With neither pipe
+  saturated, the throughput ceilings derived from K6's profile both sit above
+  cuBLAS and bound nothing, so these predictions rest on structure alone.
+- **Measured**: **8041.9 GFLOP/s**, the median of three runs taken after a
+  cooldown (8008.7 to 8054.8, a 0.57% range); **88.04% of the cuBLAS run in
+  the same benchmark** (87.95% to 88.37%) and **1.164x over K6** (1.161x to
+  1.171x). All three runs have cuBLAS inside its run-to-run band.
+- **Search** (`results/rtx4060-laptop/tuning_k7.csv`, one run): k7 8027.9,
+  c4 7102.4, c2 6748.9, **c1 6594.5**, c7 6241.2, c5 6148.2, c8 6128.1, c6
+  5988.5; c3 is the same configuration as k7 and measured 7998.9, 0.36% apart.
+  The ranking repeats one taken earlier on uncommitted code, which is not
+  published.
+- **Difference**: the structural prediction held - the two smaller-tile
+  configurations came first and second, and the searched best landed inside
+  its range, 3.1% under the point estimate. The quantitative prediction for
+  warp tiling did not: **K6's geometry with warp tiling (c1) runs at about
+  0.96x of K6**. The 1.164x gain comes entirely from the tuning. Quoting
+  "warp tiling: 1.16x" would be wrong, which is what the control
+  configuration is for.
+- **Evidence** (`profiling/reports/rtx4060-laptop/k7_20260916_002316.details.csv`):
+  achieved occupancy doubles from 33.16% to 65.83%; registers per thread fall
+  from 107 to 64, so the register limit allows four blocks per SM instead of
+  two; eligible warps per scheduler rise from 1.57 to 3.07 and cycles with no
+  eligible warp fall from 41.95% to 29.98%. The cost is visible too: the
+  L1/TEX hit rate falls from 61.23% to 34.77% as each thread reuses less, and
+  warp cycles per issued instruction rise from 6.97 to 11.31. Twice the warps
+  more than pay for slower ones.
+- **Where the limit is now**: compute 67.2%, memory 75.2%, still neither
+  saturated, with occupancy bounded by registers and shared memory. 88.04%
+  leaves 1.075x before 95% of cuBLAS, the practical ceiling for this ladder.
+- **Measurement note**: an earlier run of this configuration, taken after
+  hours of back-to-back benchmarks with the part at 80-85 C, came out 8%
+  lower. Three runs after a cooldown agree within 0.57%; that run is not used.
