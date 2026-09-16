@@ -1,0 +1,214 @@
+"""Figures for the README: the size sweep and the roofline.
+
+Every value plotted is read from results/ or from an exported ncu report;
+nothing is typed in by hand. Run from the repository root:
+
+    python3 profiling/plot.py [--device rtx4060-laptop]
+"""
+import argparse
+import csv
+import glob
+import statistics
+from pathlib import Path
+
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt  # noqa: E402
+from matplotlib.ticker import FuncFormatter, NullFormatter  # noqa: E402
+
+# Validated categorical slots (light surface), text and chrome tokens.
+SERIES = ["#2a78d6", "#eb6834", "#1baf7a"]
+SURFACE = "#fcfcfb"
+TEXT = "#0b0b0b"
+TEXT2 = "#52514e"
+GRID = "#e6e5e1"
+REF = "#b9b8b2"  # reference lines: visible, but quieter than data
+
+FLOP_4096 = 2 * 4096**3
+# Candidate knee positions: A + B = 8 N^2 bytes equal to the L2 size.
+L2_BYTES = 33_554_432
+L2_PERSIST_BYTES = 23_068_672
+N_L2 = (L2_BYTES / 8) ** 0.5
+N_L2_PERSIST = (L2_PERSIST_BYTES / 8) ** 0.5
+# Formed after the first sweep: a single matrix (4 N^2 bytes) filling L2.
+N_L2_ONE = (L2_BYTES / 4) ** 0.5
+
+
+def style(ax):
+    ax.set_facecolor(SURFACE)
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    for side in ("left", "bottom"):
+        ax.spines[side].set_color(GRID)
+        ax.spines[side].set_linewidth(1)
+    ax.tick_params(colors=TEXT2, labelsize=8, length=0)
+    ax.grid(True, color=GRID, linewidth=0.8, linestyle="-")
+    ax.set_axisbelow(True)
+
+
+def read(path):
+    with open(path, newline="") as f:
+        return list(csv.DictReader(f))
+
+
+def knee(points):
+    """First N >= 1280 whose throughput is at least 5% under the best of all
+    smaller N, with the next grid point under that bar too."""
+    points = sorted(points)
+    for i in range(1, len(points) - 1):
+        n, g = points[i]
+        if n < 1280:
+            continue
+        best = max(v for _, v in points[:i])
+        best_next = max(v for _, v in points[: i + 1])
+        if g <= 0.95 * best and points[i + 1][1] <= 0.95 * best_next:
+            return n
+    return None
+
+
+def plot_sweep(rows, out):
+    by = {}
+    for r in rows:
+        # "refine" rows are extra ascending-order sizes added around the step.
+        key = (r["kernel"], "descending" if r["tag"] == "desc" else "ascending")
+        by.setdefault(key, []).append((int(r["M"]), float(r["gflops_median"])))
+    panels = [("k0", "cuBLAS"), ("k2", "K2 coalesced, untiled"), ("k7", "K7 tuned")]
+    fig, axes = plt.subplots(1, 3, figsize=(12, 3.8), facecolor=SURFACE)
+    knees = {}
+    for ax, (k, title) in zip(axes, panels):
+        style(ax)
+        passes = [p for p in ("ascending", "descending") if (k, p) in by]
+        for j, p in enumerate(passes):
+            pts = sorted(by[(k, p)])
+            xs, ys = zip(*pts)
+            ax.plot(xs, ys, color=SERIES[j], linewidth=2, solid_capstyle="round",
+                    marker="o", markersize=5, markeredgecolor=SURFACE,
+                    markeredgewidth=1.5, label=f"{p} sizes", zorder=3)
+            kn = knee(pts)
+            knees[(k, p)] = kn
+            if kn is not None and j == 0:
+                y = dict(pts)[kn]
+                ax.annotate(f"knee: {kn}", (kn, y), xytext=(28, -46),
+                            textcoords="offset points", fontsize=8, color=TEXT,
+                            arrowprops=dict(arrowstyle="-", color=TEXT2, lw=0.8))
+        refs = ((N_L2_PERSIST, "A+B fills persisting L2", 0.42),
+                (N_L2, "A+B fills L2", 0.30),
+                (N_L2_ONE, "one matrix fills L2", 0.18))
+        for x, lab, y in refs:
+            ax.axvline(x, color=REF, linewidth=1, zorder=1)
+            if k == "k2":  # label once, on the panel the lines are about
+                ax.text(x * 1.03, y, f"{lab}\nN = {x:.0f}",
+                        transform=ax.get_xaxis_transform(), fontsize=7,
+                        color=TEXT2, va="top")
+        ax.set_xscale("log", base=2)
+        ax.set_xticks([512, 1024, 2048, 4096, 8192])
+        ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{int(v)}"))
+        ax.xaxis.set_minor_formatter(NullFormatter())
+        ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:,.0f}"))
+        ax.set_ylim(bottom=0)
+        ax.set_title(title, loc="left", fontsize=10, color=TEXT)
+        ax.set_xlabel("N (square A, B, C)", fontsize=8, color=TEXT2)
+        if len(passes) > 1:
+            ax.legend(frameon=False, fontsize=8, labelcolor=TEXT2, loc="lower left")
+    axes[0].set_ylabel("GFLOP/s", fontsize=8, color=TEXT2)
+    fig.suptitle("Throughput against size. Vertical lines: where the data would fill "
+                 "the part's 32 MiB L2 (and its 22 MiB persisting share)",
+                 x=0.01, ha="left", fontsize=11, color=TEXT)
+    fig.tight_layout()
+    fig.savefig(out, dpi=150, facecolor=SURFACE)
+    plt.close(fig)
+    return knees
+
+
+def ncu_intensity(report):
+    """FLOP per byte moved, both measured inside the same ncu run."""
+    duration = mem = None
+    for r in read(report):
+        if r["Metric Name"] == "Duration" and duration is None:
+            scale = {"s": 1.0, "ms": 1e-3, "us": 1e-6}[r["Metric Unit"]]
+            duration = float(r["Metric Value"]) * scale
+        if (r["Section Name"] == "Memory Workload Analysis"
+                and r["Metric Name"] == "Memory Throughput" and mem is None):
+            mem = float(r["Metric Value"])
+    return FLOP_4096 / duration / 1e9 / mem
+
+
+def plot_roofline(results, reports, out):
+    roof = {r["bench"]: r for r in read(results / "roofline.csv")}
+    bandwidth = float(roof["copy_f4"]["gb_per_s"])
+    compute = float(roof["fma_f4"]["gflops"])
+    ridge = compute / bandwidth
+
+    headline = read(results / "gemm_4096.csv")
+    clean = [r for r in headline if not r["source_rev"].endswith("-dirty")]
+    rungs = []
+    for k in ["k1", "k2", "k3", "k4", "k5", "k6", "k7"]:
+        vals = [float(r["gflops_median"]) for r in clean if r["kernel"] == k]
+        report = sorted(glob.glob(str(reports / f"{k}_*.details.csv")))[-1]
+        rungs.append((k.upper(), ncu_intensity(report), statistics.median(vals)))
+
+    fig, ax = plt.subplots(figsize=(8, 5), facecolor=SURFACE)
+    style(ax)
+    xs = [10 ** (e / 20) for e in range(-30, 81)]
+    ax.plot(xs, [min(compute, bandwidth * x) for x in xs], color=TEXT,
+            linewidth=2, label="measured roof", zorder=2)
+    ax.plot(xs, [256.0 * x for x in xs], color=TEXT2, linewidth=1,
+            label="theoretical bandwidth (256 GB/s)", zorder=1)
+    ax.plot([x for _, x, _ in rungs], [y for _, _, y in rungs], color=SERIES[0],
+            linewidth=1, alpha=0.5, zorder=3)
+    ax.scatter([x for _, x, _ in rungs], [y for _, _, y in rungs], s=40,
+               color=SERIES[0], edgecolor=SURFACE, linewidth=1.5,
+               label="SGEMM rungs at 4096³", zorder=4)
+    for name, x, y in rungs:
+        ax.annotate(name, (x, y), xytext=(6, -3), textcoords="offset points",
+                    fontsize=8, color=TEXT)
+    micro = [("triad", float(roof["triad_f4"]["arith_intensity"]), float(roof["triad_f4"]["gflops"])),
+             ("FMA", float(roof["fma_f4"]["arith_intensity"]), compute)]
+    ax.scatter([x for _, x, _ in micro], [y for _, _, y in micro], s=40,
+               color=SERIES[1], edgecolor=SURFACE, linewidth=1.5,
+               label="micro-benchmarks", zorder=4)
+    for name, x, y in micro:
+        ax.annotate(name, (x, y), xytext=(6, 4), textcoords="offset points",
+                    fontsize=8, color=TEXT)
+    ax.annotate(f"ridge {ridge:.0f} FLOP/byte", (ridge, compute), xytext=(-10, 10),
+                textcoords="offset points", fontsize=8, color=TEXT2, ha="right")
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlim(0.03, 1e4)
+    ax.set_ylim(1, 3e4)
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:,.0f}"))
+    ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g}"))
+    ax.set_xlabel("arithmetic intensity (FLOP per byte moved)", fontsize=8, color=TEXT2)
+    ax.set_ylabel("GFLOP/s", fontsize=8, color=TEXT2)
+    ax.set_title(f"Roofline, measured: {bandwidth:.0f} GB/s bandwidth, "
+                 f"{compute / 1000:.1f} TFLOP/s compute",
+                 loc="left", fontsize=11, color=TEXT)
+    ax.legend(frameon=False, fontsize=8, labelcolor=TEXT2, loc="lower right")
+    fig.tight_layout()
+    fig.savefig(out, dpi=150, facecolor=SURFACE)
+    plt.close(fig)
+    return bandwidth, compute, ridge, rungs
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--device", default="rtx4060-laptop")
+    args = ap.parse_args()
+    results = Path("results") / args.device
+    reports = Path("profiling/reports") / args.device
+    img = Path("docs/img")
+    img.mkdir(parents=True, exist_ok=True)
+    if (results / "gemm_sweep.csv").exists():
+        knees = plot_sweep(read(results / "gemm_sweep.csv"), img / "sweep.png")
+        for (k, p), n in knees.items():
+            print(f"sweep {k} {p}: knee {n if n else 'none'}")
+    if (results / "roofline.csv").exists():
+        b, c, r, rungs = plot_roofline(results, reports, img / "roofline.png")
+        print(f"roofline: bandwidth {b:.1f} GB/s, compute {c:.1f} GFLOP/s, ridge {r:.1f} FLOP/byte")
+        for name, x, y in rungs:
+            print(f"  {name}: {x:.2f} FLOP/byte, {y:.1f} GFLOP/s")
+
+
+if __name__ == "__main__":
+    main()

@@ -270,10 +270,15 @@ otherwise the loads fall back to element at a time, which is what the
   at 59.59% compute throughput the arithmetic alone cannot take less than
   33.828 ms x 0.5959 = 20.158 ms, which is 6818 GFLOP/s at perfect efficiency.
   Exceeding 6818 would mean that ceiling was not a ceiling.
-- **Measured**: 6902.8 GFLOP/s, **76.82% of the cuBLAS run inside the same
-  benchmark**, 1.706x over K5 (19.911 ms median, spread 6.3%).
+- **Measured**: 6899.5 GFLOP/s (19.920 ms), the median of three runs taken
+  alongside K7 (0.43% range), **75.85% of the cuBLAS run in the same
+  benchmark** and 1.70x over K5 (across runs, each with cuBLAS inside its
+  run-to-run band). This entry first quoted a single run of 6902.8 GFLOP/s
+  (rows 11-13 of `gemm_4096.csv`); that run was taken from an uncommitted
+  tree, so its rows stay in the file but are no longer quoted. The numbers
+  agree within 0.05%.
 - **Difference**: inside the predicted range but 8% under the point estimate,
-  and 1.2% **past** the supposed compute ceiling: 19.911 ms against 20.158 ms.
+  and 1.2% **past** the supposed compute ceiling: 19.920 ms against 20.158 ms.
   The ceiling assumed the arithmetic work was irreducible, but vectorizing also
   removes address arithmetic, which is compute-side work - registers per thread
   fall from 121 to 107. A ceiling derived from a profile is only a ceiling for
@@ -341,3 +346,45 @@ isolates the warp-level blocking from the tuning.
 - **Measurement note**: an earlier run of this configuration, taken after
   hours of back-to-back benchmarks with the part at 80-85 C, came out 8%
   lower. Three runs after a cooldown agree within 0.57%; that run is not used.
+
+## Size sweep: where L2 stops holding the data
+
+`make sweep` measures cuBLAS, K2 and K7 at 17 square sizes from 512 to 8192,
+dense between 1408 and 2304 (`results/rtx4060-laptop/gemm_sweep.csv`). K2 is
+the rung that should show an L2 effect most clearly: it is untiled and reads
+A and B from global memory at every step. K2 was also swept a second time in
+descending order around the candidates, so a step that is really thermal drift
+would move between the two passes.
+
+- **Prediction**, recorded before the sweep: a knee in K2 where A + B
+  (8 N^2 bytes) fills L2. Two candidate capacities - the full 32 MiB (N = 2048)
+  or the 22 MiB the driver reports as the persisting share (N = 1698) - plus a
+  live alternative, no knee at all, because K2's profile at 4096^3 shows DRAM
+  at only 20% of its traffic. The knee was defined in advance as the first N
+  at least 5% under the best of all smaller N, with the next point under that
+  bar too. No knee was predicted for cuBLAS or K7.
+- **Measured**: K2 is flat from 512 to 2560 (941 to 957 GFLOP/s) and then
+  steps down by 12% to about 838, where it stays up to 8192. The descending
+  pass, which reached 3072 first and coolest, shows the same step, so it is a
+  size effect. cuBLAS and K7 show no knee. All three candidates were wrong: no
+  step at 1698 or 2048, and a step does exist.
+- **A hypothesis formed after the sweep, then tested**: the part of the data
+  that has to live in L2 is one matrix (4 N^2 bytes), not A and B together -
+  K2 reads each row of A in place while sweeping down whole columns of B. One
+  32 MiB matrix is N = 2896. Five more sizes were measured to test it:
+  2432, 2688 and 2816 stay high (957.1, 953.8, 952.1); 2880, where one matrix
+  fills 98.9% of L2, has started to fall (929.2); 2944, just past the
+  capacity, is halfway down (883.8); 3072 is at the bottom. The location holds;
+  the prediction that 2944 would already be at the bottom did not - the step
+  is a soft transition between 2880 and 3072, not a single edge.
+- **Evidence** (`profiling/reports/rtx4060-laptop/k2_*.details.csv` at 1536,
+  2560 and 3072): the L2 hit rate is 88.43% and 90.08% before the step and
+  45.85% after it, while DRAM's share of the traffic goes from 4.06% to 19.75%
+  and the L1/TEX hit rate does not move (94.96% to 94.98%). The persisting L2
+  size the profiler reports is 6.29 MB at every size - not the 22 MiB the
+  driver lists, which is why that candidate was the wrong one.
+- **Measurement note**: the sweep ran for 38 minutes without a pause; its
+  cuBLAS point at 4096^3 is 5.7% under the device baseline and every row of
+  that size is flagged out of band. The shapes of the curves are what this
+  run is for; its absolute numbers are not compared with the headline runs.
+

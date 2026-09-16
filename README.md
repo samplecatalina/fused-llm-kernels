@@ -53,7 +53,7 @@ rows 2-7):
 | K3 | shared-memory tiling (BM×BK / BK×BN) | shared bandwidth, low compute ratio | 757.6 | 8.3% | **0.90x** |
 | K4 | 1D thread tiling (TM results per thread) | register reuse | 1541.4 | 16.9% | 2.03x |
 | K5 | 2D thread tiling (TM×TN register block) | instruction scheduling | 4062.9 | 44.6% | 2.64x |
-| K6 | float4 vectorized loads, transposed A tile | latency and parallelism | 6902.8 | 76.8% | 1.71x |
+| K6 | float4 vectorized loads, transposed A tile | latency and parallelism | 6899.5 | 75.9% | 1.70x |
 | K7 | warp tiling + parameter search (128×64×16, 8×4) | occupancy bounded by registers and shared memory | 8041.9 | 88.0% | 1.16x |
 
 The baseline itself was measured four times (rows 2, 8, 9, 10): 9115.1,
@@ -63,10 +63,9 @@ clock drops from 2415 to 2346 MHz. Percentages above carry that uncertainty.
 An earlier baseline taken with the host power configuration set wrong came out
 26.2% lower, which is why the enforced power limit is recorded in every row.
 
-K6 was measured in its own run alongside K0 and K5 (cuBLAS 8986.2 GFLOP/s
-there, within the 2.2% run-to-run band); its ratio and percentage are quoted
-against that run. K7 is the median of three runs after a cooldown, each
-alongside K0 and K6 (0.57% range); its 1.16x over K6 comes from the parameter
+K6 and K7 are medians of three runs after a cooldown, each run measuring K0,
+K6 and K7 together (0.43% and 0.57% ranges); K6's ratio to K5 spans two runs
+whose cuBLAS results both sit inside the band. K7's 1.16x over K6 comes from the parameter
 search, not from warp tiling itself - with K6's geometry, warp tiling alone
 runs at about 0.96x (`results/rtx4060-laptop/tuning_k7.csv`).
 
@@ -74,6 +73,19 @@ K3 is slower than K2, and the profile says why: K2 was already served out of
 L1 at a 94.98% hit rate, so moving the same data into shared memory by hand
 replaced a free cache with an explicit copy and two barriers per tile. The
 optimization log carries the full reading.
+
+### Size sweep
+
+![Throughput against size for cuBLAS, K2 and K7](docs/img/sweep.png)
+
+K2, which reads A and B straight from global memory, loses 12% between 2880
+and 3072 and never recovers, and the profile shows why: its L2 hit rate halves
+(90% to 46%) and DRAM's share of its traffic quintuples. The step sits where a
+single 32 MiB matrix no longer fits in L2 (N = 2896), not where A and B
+together stop fitting (N = 2048) - the location that had been predicted
+before the sweep. cuBLAS and K7 move data in tiles and show no step. Details,
+including the predictions and the extra sizes that located the step, are in
+the optimization log.
 
 Rungs not yet written:
 
