@@ -87,6 +87,18 @@ before the sweep. cuBLAS and K7 move data in tiles and show no step. Details,
 including the predictions and the extra sizes that located the step, are in
 the optimization log.
 
+### Roofline
+
+![Measured roofline with every rung placed on it](docs/img/roofline.png)
+
+Both roofs are measured on this part: 200.6 GB/s of achievable bandwidth
+(78% of what the memory clock and bus width allow) and 12.6 TFLOP/s of
+sustained FP32 compute, meeting at 63 FLOP per byte. A triad sits exactly on
+the slanted roof and a register-only FMA loop defines the flat one. The rungs
+climb towards the ridge; K7 reaches 74% of the roof at its intensity and
+cuBLAS 72% of the compute roof. `profiling/plot.py` draws both figures from
+the CSVs and the exported profiles.
+
 Rungs not yet written:
 
 | Rung | What it adds | Bottleneck it targets | Status |

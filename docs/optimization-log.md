@@ -388,3 +388,46 @@ would move between the two passes.
   that size is flagged out of band. The shapes of the curves are what this
   run is for; its absolute numbers are not compared with the headline runs.
 
+## Roofline: both ceilings measured
+
+`make roofline` runs five micro-benchmarks under the same discipline as the
+SGEMM benchmarks (`results/rtx4060-laptop/roofline.csv`). Traffic counts
+bytes loaded plus bytes stored, the same accounting the profiler uses.
+
+- **Prediction**, recorded before any run: a compute ceiling of 12.0 TFLOP/s,
+  derived two independent ways - K7 at 8.04 TFLOP/s and 67.19% compute
+  throughput gives 11.97, K6 at 6.90 and 56.54% gives 12.21 - with the
+  constraint that it has to exceed cuBLAS (9.1 TFLOP/s) or the benchmark is
+  broken; a bandwidth of 200 GB/s (70-85% of the 256 GB/s derived from the
+  driver-reported memory clock and bus width); a ridge near 60 FLOP/byte;
+  triad on the slanted roof within 30%; and scalar copy and scalar FMA at half
+  or less of their float4 versions.
+- **A broken first version**: with 1024 iterations per thread, one FMA call
+  lasted 70 us and measured 7.0 TFLOP/s - below cuBLAS, which the constraint
+  above rules out. Launch overhead was setting the duration. Throughput rises
+  with the iteration count and plateaus by 262144 (within about 1% of a
+  million iterations), which is the default now; nothing from the short
+  version is recorded.
+- **Measured**:
+
+  | Benchmark | Result | Prediction |
+  |---|---|---|
+  | `fma_f4` (compute roof) | **12.63 TFLOP/s** (spread 4.3%) | 12.0 - held |
+  | `copy_f4` (bandwidth roof) | **200.6 GB/s**, 78.3% of the theoretical 256 | 200 - held |
+  | `triad_f4` | 34.4 GFLOP/s at 206.3 GB/s, exactly 1/6 of its traffic | on the slanted roof - held |
+  | ridge | **63.0 FLOP/byte** | about 60 - held |
+  | `copy_f1` | 213.0 GB/s, 6% *faster* than float4 | half or less - wrong |
+  | `fma_f1` | 11.24 TFLOP/s, 0.89 of float4 | half to a third - wrong |
+
+- **What the two misses say**: for sequential access, one float per
+  instruction costs nothing extra here. The memory path is limited by requests
+  when accesses are scattered - K1 against K2, K5 against K6 - but a
+  contiguous copy is limited by bytes. That narrows the claim the earlier
+  rungs supported.
+- **Where the rungs sit** (`docs/img/roofline.png`). Each rung's arithmetic
+  intensity is taken from its own ncu report (2 N^3 FLOPs over the profiled
+  duration, divided by the profiled memory throughput); its height is the
+  headline measurement. Against the roof at that intensity: K1 9.0%, K2
+  32.9%, K3 29.3%, K4 54.3%, K5 40.3%, K6 54.6%, K7 73.9%. Every rung but K6
+  still sits under the slanted, memory-bound roof, and K6 is just past the
+  ridge (64.3 FLOP/byte). cuBLAS reaches 71.5% of the compute roof.

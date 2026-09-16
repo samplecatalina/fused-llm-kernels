@@ -107,7 +107,11 @@ MemoryWorkloadAnalysis, Occupancy, SchedulerStats, WarpStateStats. The "why is
 it faster" paragraph for each rung must cite the corresponding measurement;
 theory alone does not count.
 
-**Roofline ceilings are measured, not quoted.** A triad/copy micro-benchmark
+**Roofline ceilings are measured, not quoted** (`make roofline`): a float4
+copy over 256 MiB arrays for achievable bandwidth (200.6 GB/s on the
+development GPU), a register-only FMA loop for sustained FP32 compute (12.63
+TFLOP/s), and a triad as a check that sits on the slanted roof. The earlier
+plan follows. A triad/copy micro-benchmark
 for achievable DRAM bandwidth, an FMA saturation micro-benchmark for achievable
 FP32 throughput, and the ridge point computed from those two. The reason is
 specific to this machine: the mobile 4060's power budget and clocks move with

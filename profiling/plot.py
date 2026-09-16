@@ -42,7 +42,7 @@ def style(ax):
     for side in ("left", "bottom"):
         ax.spines[side].set_color(GRID)
         ax.spines[side].set_linewidth(1)
-    ax.tick_params(colors=TEXT2, labelsize=8, length=0)
+    ax.tick_params(which="both", colors=TEXT2, labelsize=8, length=0)
     ax.grid(True, color=GRID, linewidth=0.8, linestyle="-")
     ax.set_axisbelow(True)
 
@@ -121,6 +121,23 @@ def plot_sweep(rows, out):
     return knees
 
 
+def headline_report(reports, kernel, shape="4096x4096x4096"):
+    """Latest exported ncu report for a kernel at the headline shape.
+
+    Reports are named <kernel>_<shape>_<timestamp>; older ones carry no shape
+    and were all taken at the headline shape."""
+    found = []
+    for path in glob.glob(str(reports / f"{kernel}_*.details.csv")):
+        stem = Path(path).name[len(kernel) + 1:]
+        first = stem.split("_", 1)[0]
+        taken_at = first if "x" in first else shape
+        if taken_at == shape:
+            found.append(path)
+    if not found:
+        raise SystemExit(f"no {shape} report for {kernel} in {reports}")
+    return sorted(found, key=lambda f: Path(f).name.rsplit("_", 2)[-2:])[-1]
+
+
 def ncu_intensity(report):
     """FLOP per byte moved, both measured inside the same ncu run."""
     duration = mem = None
@@ -145,12 +162,12 @@ def plot_roofline(results, reports, out):
     rungs = []
     for k in ["k1", "k2", "k3", "k4", "k5", "k6", "k7"]:
         vals = [float(r["gflops_median"]) for r in clean if r["kernel"] == k]
-        report = sorted(glob.glob(str(reports / f"{k}_*.details.csv")))[-1]
+        report = headline_report(reports, k)
         rungs.append((k.upper(), ncu_intensity(report), statistics.median(vals)))
 
     fig, ax = plt.subplots(figsize=(8, 5), facecolor=SURFACE)
     style(ax)
-    xs = [10 ** (e / 20) for e in range(-30, 81)]
+    xs = [10 ** (e / 20) for e in range(-30, 111)]
     ax.plot(xs, [min(compute, bandwidth * x) for x in xs], color=TEXT,
             linewidth=2, label="measured roof", zorder=2)
     ax.plot(xs, [256.0 * x for x in xs], color=TEXT2, linewidth=1,
@@ -160,9 +177,11 @@ def plot_roofline(results, reports, out):
     ax.scatter([x for _, x, _ in rungs], [y for _, _, y in rungs], s=40,
                color=SERIES[0], edgecolor=SURFACE, linewidth=1.5,
                label="SGEMM rungs at 4096³", zorder=4)
+    # K2 and K3 sit almost on top of each other; nudge their labels apart.
+    offsets = {"K2": (-20, 6), "K3": (6, -10), "K6": (6, -6), "K7": (-22, 4)}
     for name, x, y in rungs:
-        ax.annotate(name, (x, y), xytext=(6, -3), textcoords="offset points",
-                    fontsize=8, color=TEXT)
+        ax.annotate(name, (x, y), xytext=offsets.get(name, (6, -3)),
+                    textcoords="offset points", fontsize=8, color=TEXT)
     micro = [("triad", float(roof["triad_f4"]["arith_intensity"]), float(roof["triad_f4"]["gflops"])),
              ("FMA", float(roof["fma_f4"]["arith_intensity"]), compute)]
     ax.scatter([x for _, x, _ in micro], [y for _, _, y in micro], s=40,
@@ -171,11 +190,11 @@ def plot_roofline(results, reports, out):
     for name, x, y in micro:
         ax.annotate(name, (x, y), xytext=(6, 4), textcoords="offset points",
                     fontsize=8, color=TEXT)
-    ax.annotate(f"ridge {ridge:.0f} FLOP/byte", (ridge, compute), xytext=(-10, 10),
-                textcoords="offset points", fontsize=8, color=TEXT2, ha="right")
+    ax.annotate(f"ridge: {ridge:.0f} FLOP/byte", (ridge, compute), xytext=(8, 8),
+                textcoords="offset points", fontsize=8, color=TEXT2)
     ax.set_xscale("log")
     ax.set_yscale("log")
-    ax.set_xlim(0.03, 1e4)
+    ax.set_xlim(0.03, 3e5)
     ax.set_ylim(1, 3e4)
     ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:,.0f}"))
     ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g}"))
