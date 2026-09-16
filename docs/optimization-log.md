@@ -248,3 +248,44 @@ to separate.
   registers per thread only 2 blocks fit per SM, and the work per thread makes
   up for the missing warps. Shared-memory traffic per FLOP is what the next
   rung has to attack.
+
+## K6 - float4 vectorized loads, transposed A tile
+
+Same geometry as K5. Three changes, all about instruction count rather than
+bytes: the A tile is stored transposed so the values a thread needs for one k
+are contiguous, the inner loop reads both operands as float4 (16 scalar shared
+loads per k become 4 vector loads), and the global loads are vectorized as
+well. float4 needs 16-byte alignment, so the vector path is taken only when K
+and N are multiples of 4 and the group of four stays inside the matrix;
+otherwise the loads fall back to element at a time, which is what the
+`4097x513x129` shape exercises.
+
+- **Hypothesis**: K5 was limited by the memory pipe feeding the registers
+  (96.4% against 59.6% compute). The same bytes, fetched with a quarter of the
+  instructions, should relieve it. The transposing store costs four scalar
+  stores per chunk, but it runs once per tile while the inner loop runs 16
+  times, so the trade should pay.
+- **Prediction**: 7534 GFLOP/s (range 5795-8577), recorded before the
+  benchmark ran. The lower end, 5795, is a floor derived from K5's own profile:
+  at 59.59% compute throughput the arithmetic alone cannot take less than
+  33.828 ms x 0.5959 = 20.158 ms, which is 6818 GFLOP/s at perfect efficiency.
+  Exceeding 6818 would mean that ceiling was not a ceiling.
+- **Measured**: 6902.8 GFLOP/s, **76.82% of the cuBLAS run inside the same
+  benchmark**, 1.706x over K5 (19.911 ms median, spread 6.3%).
+- **Difference**: inside the predicted range but 8% under the point estimate,
+  and 1.2% **past** the supposed compute ceiling: 19.911 ms against 20.158 ms.
+  The ceiling assumed the arithmetic work was irreducible, but vectorizing also
+  removes address arithmetic, which is compute-side work - registers per thread
+  fall from 121 to 107. A ceiling derived from a profile is only a ceiling for
+  changes that leave the instruction mix alone.
+- **Evidence** (`profiling/reports/rtx4060-laptop/k6_20260915_234804.details.csv`):
+  the memory pipe drops from 96.35% to 71.37% of peak and the L1/TEX path from
+  97.33% to 73.13%, warp cycles per issued instruction from 10.43 to 6.97, and
+  the share of cycles with no eligible warp from 62.01% to 41.95%. Achieved
+  occupancy is unchanged at 33%. Same bytes, same occupancy, 1.7x the
+  throughput: on this part the memory path is limited by requests, not by
+  bytes - the same conclusion K1 and K2 reached from the other direction.
+- **Where the limit is now**: memory 71.37%, compute 56.54%, neither
+  saturated, occupancy 33.16% with 107 registers per thread allowing two
+  blocks per SM. The limit has moved from a saturated pipe to latency and
+  parallelism.
