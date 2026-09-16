@@ -148,3 +148,34 @@ it for all 8 results.
 - **Measured**: pending.
 - **Difference**: pending.
 - **Evidence**: pending.
+
+## K5 - 2D thread tiling
+
+Each thread owns an 8x8 block of C. For every k it reads the 8 values of A
+and the 8 values of B it needs into registers and accumulates their outer
+product into 64 result registers. Tiles change to 128x128 results with 16
+values of k per tile: a 2D split divides the threads per block by 8 in both
+directions, and 32x32 tiles would leave 16 threads per block, fewer than one
+warp. This rung therefore changes two things at once, which the profile has
+to separate.
+
+- **Hypothesis**: K4 reuses registers only on the B side; the A values are
+  still read once per result. With an 8x8 register block, shared-memory
+  traffic falls from 2.25 to 0.5 bytes per FLOP and the inner multiply-add
+  runs entirely in registers. The limit should start moving to the compute
+  side: 80 register floats per thread and 8x fewer, heavier threads than K4,
+  so Occupancy's register and warp limits become relevant. Accessing A down a
+  column and B along a row in the same loop is left for the next rung.
+- **Prediction**: 750 GFLOP/s (range 350-2000), recorded before the first
+  benchmark run, about 1.7x the K4 prediction. That is roughly 10% of the
+  measured cuBLAS baseline, six times below an estimate of 60-80% made before
+  the ladder was started. The gap is traceable to one assumption: every
+  prediction from K1 on compounds the claim that K1 is bandwidth-bound near
+  0.25 FLOP/byte. If K1 measures at 150 GFLOP/s or more, the starting point
+  is wrong and only the rung-to-rung ratios remain testable; if K5 reaches
+  60% of cuBLAS, the earlier estimate was right. If K5 is within 10% of K4,
+  register or occupancy limits cancelled the 2D split, or the tile change
+  cost something, which Occupancy and LaunchStats should separate.
+- **Measured**: pending.
+- **Difference**: pending.
+- **Evidence**: pending.
