@@ -512,3 +512,72 @@ bytes loaded plus bytes stored, the same accounting the profiler uses.
   compute, kept a 35.67% hit rate but hid no latency. The same interleaving
   produces both effects, and on this GPU they cancel: K8 matches K7 rather
   than beating it.
+
+## E track - fused bias + SiLU epilogue
+
+- **Hypothesis**: an unfused `SiLU(A·B + bias)` stores the product in an M×N
+  buffer, then a second kernel loads it and stores D. Fusing the bias and SiLU
+  into the GEMM's register block removes one launch, one M×N store and one
+  M×N load. The saving does not depend on K, so the gain should shrink as the
+  GEMM itself grows with K. Profiles should show equal occupancy for the two
+  GEMM parts and a separate, memory-bound element-wise kernel in `e0`.
+- **Implementation**: `e0` and `e1` share one K7-structured template
+  (128×64×16, 8×4 thread tiles, 32×32 warp tiles) and differ only in the
+  write-back. K7 is not reused for `e0` because its `beta` term loads C even
+  when `beta` is 0. The template compiles to 71 registers per thread (K7: 64):
+  dropping that load changes the register assignment of the write-back, and
+  six other write-back forms gave 70-71. Both paths pay it equally. The
+  element-wise kernel processes four elements of one row per thread.
+- **Correctness**: the three standard shapes and every K of the sweep pass
+  against the cuBLAS product with bias and SiLU applied on the host;
+  `make test-epilogue` passes 66 checks; Compute Sanitizer reports no races or
+  memory errors.
+- **Prediction**, committed before any timing of these kernels: gain
+  `min(1 + c/K, (2K + 3N)/(2K + N))` with `c = P*T_pass/(2MN)`,
+  P = 7900 GFLOP/s and T_pass = 1.0 ms (8 bytes per element at an effective
+  100-200 GB/s), so c = 235 (160-390): 1.057 at K = 4096, 1.23 at K = 1024,
+  1.92 at K = 256, about 2.9 below K = 125.
+- **Measured** (`epilogue_sweep.csv`, tag `epilogue`, source `d7fc305`; one
+  cooled pass, each kernel in an early and a late slot of each shape; the part
+  ran near 86 C and K0 at 4096³ was 6.7% under its band, so only the ratios
+  within a shape are used):
+
+  | K | e0 (ms) | e1 (ms) | gain | predicted | e0 - e1 (ms) |
+  |---|---|---|---|---|---|
+  | 32 | 0.954 | 0.360 | **2.65** | 2.97 | 0.594 |
+  | 64 | 0.978 | 0.442 | **2.21** | 2.94 | 0.536 |
+  | 128 | 1.234 | 0.686 | **1.80** | 2.84 | 0.548 |
+  | 256 | 1.771 | 1.234 | **1.43** | 1.92 | 0.536 |
+  | 512 | 2.833 | 2.316 | **1.22** | 1.46 | 0.517 |
+  | 1024 | 4.955 | 4.515 | **1.10** | 1.23 | 0.440 |
+  | 2048 | 9.689 | 9.268 | **1.05** | 1.115 | 0.421 |
+  | 4096 | 19.009 | 18.674 | **1.02** | 1.057 | 0.335 |
+  | 8192 | 37.923 | 37.512 | **1.01** | 1.029 | 0.410 |
+
+- **Evidence** (`e0_/e1_4096x4096x4096_20260916_2327*`,
+  `e0_/e1_4096x4096x64_20260916_2329*`/`_2330*`): the two GEMM parts have 71
+  registers, a register block limit of three and occupancy 49.58% / 49.57%
+  (48.86% / 48.73% at K = 64). The element-wise kernel lasts 636 us and
+  500 us in the two profiles, moves 204 and 232 GB/s - at or above the
+  200.6 GB/s copy roof - at 17% compute throughput, which is 6.9-7.7 bytes
+  per element: the load of C and the store of D, with the bias loads served
+  from L1.
+- **Difference**: the gains are lower than predicted at every K except 32,
+  and the curve has no corner.
+  - *Magnitude*: the byte count was right, the bandwidth was not. The pass is
+    a contiguous, compute-free mover and runs at the roof, so it costs about
+    0.5-0.6 ms, not 1.0. The GEMM part also ran slower in this hot pass
+    (7383.5 GFLOP/s at K = 4096). The measured `(gain - 1)*K` is 73-114 for
+    K from 128 to 8192, about 0.43x of the predicted c. Recomputing c from
+    the profiled inputs gives about 140; the remaining gap at large K is
+    within the timing noise of a 19 ms kernel (1% is 0.19 ms) or the cost of
+    the inline activation, and this data does not separate the two.
+  - *Shape*: the gain is `1 + T_pass / T_fused(K)`. `min(1 + c/K, ceiling)`
+    only describes its two asymptotes. `T_fused` has a fixed part (e1 takes
+    0.36 ms at K = 32), so near the crossover the curve sits below both
+    asymptotes. The small-K plateau is set by the pass time over that fixed
+    part - 2.65 at K = 32 - not by the byte ratio (2.97), because the pass
+    moves its bytes faster than the fused kernel stores D.
+  - *What held*: the difference `e0 - e1` is flat at 0.52-0.59 ms for
+    K <= 512 and matches the profiled pass, so fusion removes a fixed,
+    K-independent cost, and M and N do not enter the gain.

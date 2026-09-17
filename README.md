@@ -1,7 +1,8 @@
 # fused-llm-kernels
 
 An FP32 SGEMM optimization ladder for Ada (sm_89), from a naive kernel to warp
-tiling and double buffering, with fused Triton operators planned. Every step up the ladder is backed by
+tiling and double buffering, a fused GEMM + bias + SiLU epilogue, with fused
+Triton operators planned. Every step up the ladder is backed by
 Nsight Compute data rather than by an explanation of what should have happened.
 
 The technical route itself is well-trodden. What this repository tries to get
@@ -17,7 +18,8 @@ right is the engineering around it:
 
 > **Status: in progress.** The K1-K8 GEMM ladder is implemented, measured and
 > profiled; K7 reaches 88.0% of cuBLAS, and K8 (double buffering) is a
-> documented negative result at 0.994x of K7. Triton fused operators are next.
+> documented negative result at 0.994x of K7. The fused bias + SiLU epilogue
+> is measured over K = 32..8192. Triton fused operators are next.
 > Predictions and profiling evidence are documented in `docs/optimization-log.md`.
 
 ## Quick start
@@ -101,6 +103,32 @@ together stop fitting (N = 2048) - the location that had been predicted
 before the sweep. cuBLAS and K7 move data in tiles and show no step. Details,
 including the predictions and the extra sizes that located the step, are in
 the optimization log.
+
+### Fused epilogue: GEMM + bias + SiLU
+
+![Speedup of the fused epilogue against K](docs/img/epilogue.png)
+
+A feed-forward projection is `SiLU(A·B + bias)`. Unfused, the product is
+stored in an M×N buffer and a second kernel loads it, adds the bias, applies
+SiLU and stores the result: one more launch, one more M×N store and one more
+M×N load. `e1` does the bias and SiLU in the register block of the
+K7-structured GEMM before the single store; `e0` is the same template writing
+the plain product, followed by the element-wise pass. (K7 itself is not used
+as the unfused baseline: its `beta` term loads C even when `beta` is 0.)
+
+The saving is a fixed cost that does not depend on K, so the gain is
+`1 + T_pass / T_fused(K)`: **2.65x at K = 32, 1.43x at K = 256, 1.10x at
+K = 1024 and 1.02x at K = 4096** (`results/rtx4060-laptop/epilogue_sweep.csv`,
+M = N = 4096, each kernel timed in an early and a late slot of every shape).
+The element-wise pass is a pure memory mover: its profile shows 204-232 GB/s,
+at or above the measured bandwidth roof, and 17% compute throughput, for
+0.50-0.64 ms per call. The prediction committed beforehand used the right
+byte count but a lower bandwidth (100-200 GB/s), and modelled the curve as
+`min(1 + c/K, byte-ratio ceiling)` with a corner; the measured gain is about
+0.43x of the predicted `c`, and the curve is smooth because the fused kernel
+itself has a fixed cost at small K. The optimization log has the full
+comparison. Both kernels compile to 71 registers per thread at K7's geometry
+(K7: 64), so both keep three blocks per SM; the comparison is like for like.
 
 ### Roofline
 
@@ -186,7 +214,7 @@ Counters → allow access to all users.
 ## Layout
 
 ```
-csrc/kernels/     one file per rung; add one = declare in kernels.h + a row in registry.cu
+csrc/kernels/     one file per rung (plus e_epilogue.cu); add one = declare in kernels.h + a row in registry.cu
 csrc/harness/     runner.cu: correctness, timing, CSV
 csrc/common/      error-checking macros, input generation, the two-tolerance check
 docs/             design notes and the optimization log

@@ -11,9 +11,12 @@ Concretely:
 
 1. An FP32 SGEMM ladder from naive to double buffering, measured at `4096³` against
    cuBLAS through the same harness.
-2. Fused Triton operators - RMSNorm and online softmax - compared against both
+2. One fused epilogue on the GEMM - `D = SiLU(alpha*A*B + bias)` - measured
+   against the same GEMM followed by a separate element-wise pass, over the
+   inner dimension K.
+3. Fused Triton operators - RMSNorm and online softmax - compared against both
    PyTorch eager and `torch.compile`.
-3. Stretch: a simplified fused attention forward pass.
+4. Stretch: a simplified fused attention forward pass.
 
 **Non-goals**, stated explicitly to bound the scope:
 
@@ -21,7 +24,8 @@ Concretely:
 - No FP16/BF16 GEMM and no Tensor Core WMMA on the main line. TF32 via WMMA is
   a possible side branch once the ladder is finished; it is a different
   baseline, not another rung.
-- No CUTLASS-level generality (arbitrary layouts and epilogues).
+- No CUTLASS-level generality (arbitrary layouts and epilogues); the fused
+  epilogue is one fixed form, bias + SiLU, forward only.
 - No Hopper-specific features on the portable FP32 main line.
 - No attempt to beat cuBLAS.
 
@@ -154,7 +158,32 @@ original A+B hypothesis at 2048. The descending pass and L2 counters support
 this interpretation; data are in `gemm_sweep.csv`. K0 and K7 show no analogous
 knee in that sweep.
 
-## 5. Triton operators
+## 5. Fused epilogue
+
+**Kernels.** A separate signature, `(M, N, K, alpha, A, B, bias, D)`, with bias
+broadcast over columns and no beta. `e1` applies bias and SiLU in the register
+block of a K7-structured tiled GEMM; `e0` runs the same template writing
+`alpha*A*B` into an intermediate buffer (allocated once, outside the timed
+region) and then launches an element-wise kernel: four elements of one row per
+thread, float4 access when the row start is 4-aligned. SiLU uses
+`exp(-|x|)`, so it cannot overflow. The reference is the cuBLAS product with
+bias and SiLU applied on the host in double precision; `make test-epilogue`
+adds row tails, partial tiles, K = 1, large `alpha` (both SiLU tails) and a
+nonzero initial D that neither path may read.
+
+**Model.** With `T_fused(K)` the time of `e1` and `T_pass` the time of the
+element-wise pass (independent of K), the gain is `1 + (T_pass - T_act) / T_fused(K)`,
+where `T_act` is the inline activation cost. At large K, `T_fused` grows as
+`2MNK/P` and the gain is `1 + c/K` with `c = P*T_pass/(2MN)`: M and N cancel.
+At small K, `T_fused` is dominated by its own fixed cost (storing D, the
+launch), and the gain levels off at `1 + T_pass/T_fixed`. The two asymptotes
+cross near `K = P*T_fixed/(2MN)`, but the measured curve is smooth.
+
+**Measurement.** `make epilogue`: M = N = 4096, K from 32 to 8192, order
+`k0, e0, e1, e1, e0` per shape, ratio of the two-slot means. Profiles at
+K = 4096 and K = 64 for both paths.
+
+## 6. Triton operators
 
 **RMSNorm forward.** One program per row, `y = x * rsqrt(mean(x²) + ε) * w`,
 with `BLOCK_SIZE = next_pow2(hidden)` and masking. Benchmarked over
@@ -165,7 +194,7 @@ eager and `torch.compile`. Optional extension: the backward pass.
 `torch.softmax`. The point of interest is the derivation of the reduction in
 memory traffic from three passes to one, checked against measured bandwidth.
 
-## 6. Simplified fused attention (stretch)
+## 7. Simplified fused attention (stretch)
 
 Scope fixed up front: forward only, causal, no dropout, `head_dim ∈ {64, 128}`,
 FP16 inputs with FP32 accumulation. Triton implementation, compared against the

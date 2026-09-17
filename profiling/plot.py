@@ -121,6 +121,63 @@ def plot_sweep(rows, out):
     return knees
 
 
+# Epilogue prediction, committed before the first measurement: c = P *
+# T_pass / (2 M N) with P = 7900 GFLOP/s and T_pass = 1.0 ms.
+EPILOGUE_C_PREDICTED = 235.0
+EPILOGUE_MN = 4096
+
+
+def epilogue_bound(k, n=EPILOGUE_MN):
+    """Byte-ratio ceiling: (MK + KN + 3MN) / (MK + KN + MN) with M = N = n."""
+    return (2 * k + 3 * n) / (2 * k + n)
+
+
+def epilogue_speedups(rows):
+    """Per K: mean e0 time over mean e1 time (each kernel runs in an early
+    and a late slot of the same shape)."""
+    ms = {}
+    for r in rows:
+        if r["kernel"] in ("e0", "e1"):
+            ms.setdefault(int(r["K"]), {}).setdefault(r["kernel"], []).append(
+                float(r["ms_median"]))
+    return {k: (sum(v["e0"]) / len(v["e0"])) / (sum(v["e1"]) / len(v["e1"]))
+            for k, v in sorted(ms.items()) if "e0" in v and "e1" in v}
+
+
+def plot_epilogue(rows, out):
+    speedups = epilogue_speedups(rows)
+    ks = list(speedups)
+    fig, ax = plt.subplots(figsize=(8, 4.6), facecolor=SURFACE)
+    style(ax)
+    xs = [2 ** (e / 8) for e in range(8 * 5, 8 * 13 + 1)]
+    ax.plot(xs, [epilogue_bound(x) for x in xs], color=REF, linewidth=1,
+            label="byte-ratio ceiling", zorder=1)
+    ax.plot(xs, [min(1 + EPILOGUE_C_PREDICTED / x, epilogue_bound(x)) for x in xs],
+            color=SERIES[1], linewidth=1.5, linestyle="--",
+            label=f"prediction: min(1 + {EPILOGUE_C_PREDICTED:.0f}/K, ceiling)",
+            zorder=2)
+    ax.plot(ks, [speedups[k] for k in ks], color=SERIES[0], linewidth=2,
+            marker="o", markersize=5, markeredgecolor=SURFACE,
+            markeredgewidth=1.5, label="measured", zorder=3)
+    for k in ks:
+        ax.annotate(f"{speedups[k]:.2f}x", (k, speedups[k]), xytext=(4, 6),
+                    textcoords="offset points", fontsize=7, color=TEXT)
+    ax.set_xscale("log", base=2)
+    ax.set_xticks(ks)
+    ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{int(v)}"))
+    ax.xaxis.set_minor_formatter(NullFormatter())
+    ax.set_ylim(0.9, 3.2)
+    ax.set_xlabel("K (inner dimension), M = N = 4096", fontsize=8, color=TEXT2)
+    ax.set_ylabel("unfused time / fused time", fontsize=8, color=TEXT2)
+    ax.set_title("Fusing bias + SiLU into the GEMM: gain against reduction depth",
+                 loc="left", fontsize=11, color=TEXT)
+    ax.legend(frameon=False, fontsize=8, labelcolor=TEXT2, loc="upper right")
+    fig.tight_layout()
+    fig.savefig(out, dpi=150, facecolor=SURFACE)
+    plt.close(fig)
+    return speedups
+
+
 def headline_report(reports, kernel, shape="4096x4096x4096"):
     """Latest exported ncu report for a kernel at the headline shape.
 
@@ -238,6 +295,11 @@ def main():
         knees = plot_sweep(read(results / "gemm_sweep.csv"), img / "sweep.png")
         for (k, p), n in knees.items():
             print(f"sweep {k} {p}: knee {n if n else 'none'}")
+    if (results / "epilogue_sweep.csv").exists():
+        speedups = plot_epilogue(read(results / "epilogue_sweep.csv"),
+                                 img / "epilogue.png")
+        for k, v in speedups.items():
+            print(f"epilogue K={k}: {v:.3f}x")
     if (results / "roofline.csv").exists():
         b, c, r, rungs = plot_roofline(results, reports, img / "roofline.png")
         print(f"roofline: bandwidth {b:.1f} GB/s, compute {c:.1f} GFLOP/s, ridge {r:.1f} FLOP/byte")
