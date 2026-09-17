@@ -32,12 +32,23 @@ make bench                     # headline 4096³ number -> results/<device>/gemm
 make bench KERNELS=k0          # a single rung
 make sweep                     # 512..8192 -> results/<device>/gemm_sweep.csv
 make profile K=k1              # ncu report -> profiling/reports/<device>/
+make epilogue                  # fused-epilogue sweep over K -> results/<device>/epilogue_sweep.csv
+
+make venv                      # Python env for the Triton work (uv; torch 2.14 cu132, triton 3.8)
+make check-torch               # torch sees the GPU; cuBLAS, Triton and torch.compile give correct results
+make triton-test               # fused bias+SiLU (Triton) and its baselines against a float64 reference
+make triton-bench              # eager / torch.compile / Triton timings -> results/<device>/triton_bias_silu.csv
+make triton-profile IMPL=eager # ncu report for one implementation
 ```
 
 `DEVICE` (default `rtx4060-laptop`) names the directory results are written to;
 `ARCH` (default `sm_89`) selects the build target.
 
 `scripts/install_cuda_wsl.sh` installs the CUDA toolkit inside WSL2 if needed.
+The Python environment is pinned in `requirements-lock.txt`. The torch wheel
+is built for sm_86 and newer major architectures but not for sm_89
+specifically; it runs on this part through same-major compatibility, which
+`make check-torch` verifies.
 
 ## The ladder
 
