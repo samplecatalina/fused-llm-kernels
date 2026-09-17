@@ -48,6 +48,13 @@ make triton-profile IMPL=eager # ncu report for one implementation (TSHAPE=4096x
 `ARCH` (default `sm_89`) selects the build target.
 
 `scripts/install_cuda_wsl.sh` installs the CUDA toolkit inside WSL2 if needed.
+
+Reproducing the published numbers: `make test` and the operator test targets
+pass from a clean checkout, and `make bench` reproduces the ladder within
+about 1% when the part is cooled (a rerun of K0/K7/K8 gave 9102.0, 8049.3 and
+7946.2 GFLOP/s against the published 9115.1, 8041.9 and 7845.6 - K8's
+published figure is the mean of an early and a late slot, and a single-slot
+rerun sits above it).
 The Python environment is pinned in `requirements-lock.txt`. The torch wheel
 is built for sm_86 and newer major architectures but not for sm_89
 specifically; it runs on this part through same-major compatibility, which
@@ -104,6 +111,26 @@ of 64, which lowers the resident blocks per SM from four to three, and used
 `k8c1`-`k8c5`. `make test-k8` checks
 nonzero initial C, alpha/beta, empty reductions and tile boundaries for every
 K8 entry.
+
+## Fused operators
+
+Each of these is bound by the bytes it moves, so the gain from fusing is the
+traffic it avoids, and it can be counted before any code is written. Measured
+on the same part, through harnesses that follow the same rules
+(`results/rtx4060-laptop/`).
+
+| Operator | Fused against | Gain | Fused kernel at 4096-wide work |
+|---|---|---|---|
+| GEMM + bias + SiLU (CUDA, E track) | the same GEMM plus an element-wise pass | **2.65x** at K=32, 1.43x at K=256, 1.02x at K=4096 | saves one M×N store and load, about 0.5 ms at M=N=4096 |
+| bias + SiLU (Triton) | eager `silu(x + b)` / eager 3-kernel form | **1.85-2.01x** / **3.26-3.46x** (hidden 2048-8192) | 197-207 GB/s effective, at the 200.6 GB/s roof |
+| RMSNorm forward (Triton) | eager 6-kernel form | **2.95-3.48x** | 201-212 GB/s; ties `torch.nn.RMSNorm` (0.95-1.01x) |
+| Row-wise softmax (Triton) | eager 5-kernel form | **3.27-3.74x** | 194-207 GB/s; ties `torch.softmax` (0.91-0.98x) |
+
+The fused kernels reach the roof whatever their register count or occupancy -
+30 to 60 registers per thread and 63% to 94% occupancy across the three Triton
+operators, at the same time - and handwritten Triton ties the fused kernels
+PyTorch already ships rather than beating them. What it beats is the
+multi-kernel eager form, by close to the ratio of bytes moved.
 
 ### Size sweep
 
