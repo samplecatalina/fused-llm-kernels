@@ -81,8 +81,7 @@ for comparisons within the run, not as a headline result.
 
 ## 3. The GEMM ladder
 
-K1-K7 are implemented and measured. K8 is implemented and correctness-checked;
-power-qualified performance validation is pending. The evidence below is detailed in
+K1-K8 are implemented, measured and profiled. The evidence below is detailed in
 [the optimization log](optimization-log.md), with source CSVs under
 `results/rtx4060-laptop/` and counters under `profiling/reports/rtx4060-laptop/`.
 
@@ -96,15 +95,14 @@ power-qualified performance validation is pending. The evidence below is detaile
 | K5 | 2D register tiles | Memory path saturates; register use limits occupancy |
 | K6 | float4 loads and transposed A tile | Fewer instructions, but limited parallelism |
 | K7 | Warp tiles and parameter search | Smaller tiles improve occupancy at the cost of reuse |
-| K8 | Double buffering and register prefetch | Reduced global-load and barrier waits; added registers reduce occupancy |
+| K8 | Double buffering, next tile stored directly into the alternate buffer | Hides some load latency, but interleaved buffers halve the L1 hit rate; net equal to K7 |
 
 K3/K4 use 32-cubed tiles. In K4 a 128-by-128 output tile would need too
 many threads with only 1D thread tiling. K5/K6 use 128-by-128-by-16 tiles
 with 8-by-8 results per thread. K7's search selects 128-by-64-by-16,
-8-by-4 results per thread, and 32-by-32 warp tiles. K8's provisional configuration from exploratory work is 128-by-128-by-16, 8-by-8 thread tiles and 32-by-64 warp tiles;
-its K7-geometry control is retained separately as `k8c1`. The grid must be
-repeated under confirmed full-power supply conditions before selecting a
-publishable winner.
+8-by-4 results per thread, and 32-by-32 warp tiles. K8 keeps K7's geometry, so the
+comparison isolates double buffering; its register-prefetch form (`k8c1`) and
+four prefetch variants (`k8c2`-`k8c5`) remain registered.
 
 **Negative result: K3.** Explicit shared-memory staging regresses relative
 to K2. The profiles show that K2 already benefits from high L1 hit rates;
@@ -115,6 +113,16 @@ rung can be slower than its predecessor.
 and thread count and changes only warp mapping. That change alone regresses;
 the selected smaller tile supplies the gain. Search results are preserved in
 `tuning_k7.csv`, rather than attributing the entire speedup to warp tiling.
+
+**A mechanism that works but does not pay: K8.** Double buffering removes one
+barrier per tile and lets global loads for the next tile proceed while the
+current one is computed. The paired profiles confirm the mechanism (less time
+with no eligible warp at unchanged occupancy), and also its cost: reads of one
+buffer interleaved with stores to the other halve the L1 hit rate. Elapsed
+cycles match K7's, and three order-balanced runs give K8/K7 = 0.994. Holding
+prefetched values in registers until after the compute keeps the hit rate,
+but then the no-eligible share does not fall either, and the extra register
+state crosses the limit that sets four resident blocks per SM.
 
 Boundary handling uses guards rather than padding. Every registered
 configuration is checked at `4096³`, `4097×513×129`, and `64³` against cuBLAS.

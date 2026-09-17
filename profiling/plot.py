@@ -163,11 +163,15 @@ def plot_roofline(results, reports, out):
     rungs = []
     for k in ["k1", "k2", "k3", "k4", "k5", "k6", "k7", "k8"]:
         # Keep the original published K1-K7 runs; later K7 controls belong
-        # to the K8 experiment. K8 uses only its final, fixed configuration.
+        # to the K8 experiment. K8 uses only its final runs.
         selected = [r for r in clean if r["kernel"] == k
-                    and (r["tag"] == "k8-qualified" if k == "k8"
-                         else not r["tag"].startswith("k8-"))]
+                    and (r["tag"] == "k8-final" if k == "k8"
+                         else not r["tag"].startswith("k8"))]
         vals = [float(r["gflops_median"]) for r in selected]
+        if k == "k8":
+            # Each final run measures K8 in an early and a late slot; a run's
+            # value is the mean of the two, as in the published table.
+            vals = [(a + b) / 2 for a, b in zip(vals[::2], vals[1::2])]
         if not vals:
             continue
         # Later K7 profiles are controls for the K8 experiment. Pair the

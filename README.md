@@ -15,11 +15,9 @@ right is the engineering around it:
   and clock, power and clock-event state recorded with every result row.
 - **A roofline built from micro-benchmarks**, not from datasheet numbers.
 
-> **Status: in progress.** K1-K7 are implemented, measured and profiled; K7
-> reaches 88.0% of cuBLAS. K8 double buffering is implemented and passes
-> correctness and sanitizer checks, but its power-qualified performance
-> validation is pending. Exploratory timings are excluded from published
-> results because full-power supply conditions were not established.
+> **Status: in progress.** The K1-K8 GEMM ladder is implemented, measured and
+> profiled; K7 reaches 88.0% of cuBLAS, and K8 (double buffering) is a
+> documented negative result at 0.994x of K7. Triton fused operators are next.
 > Predictions and profiling evidence are documented in `docs/optimization-log.md`.
 
 ## Quick start
@@ -42,7 +40,7 @@ make profile K=k1              # ncu report -> profiling/reports/<device>/
 ## The ladder
 
 Measured at `4096³` on an RTX 4060 Laptop GPU. K1-K5 share one run;
-K6-K7 summarize three later runs. Each percentage uses the cuBLAS measurement
+K6-K7 and K8 summarize three later runs each. Each percentage uses the cuBLAS measurement
 from its own run (`results/rtx4060-laptop/gemm_4096.csv`).
 
 | Rung | What it adds | Bottleneck left for the next rung | GFLOP/s | % of cuBLAS | vs previous |
@@ -55,6 +53,7 @@ from its own run (`results/rtx4060-laptop/gemm_4096.csv`).
 | K5 | 2D thread tiling (TM×TN register block) | saturated memory request path | 4062.9 | 44.6% | 2.64x |
 | K6 | float4 vectorized loads, transposed A tile | latency and parallelism | 6899.5 | 75.9% | 1.70x |
 | K7 | warp tiling + parameter search (128×64×16, 8×4) | occupancy bounded by registers and shared memory | 8041.9 | 88.0% | 1.16x |
+| K8 | double buffering (two alternating shared tiles, one barrier per tile) | memory throughput; the hidden load latency is paid back in L1 misses | 7845.6 | 86.7% | **0.994x** |
 
 The baseline itself was measured four times (rows 2, 8, 9, 10): 9115.1,
 9045.0, 9010.9, 8918.5 GFLOP/s - a median of 9028.0 with a 2.18% run-to-run
@@ -73,6 +72,22 @@ K3 is slower than K2, and the profile says why: K2 was already served out of
 L1 at a 94.98% hit rate, so moving the same data into shared memory by hand
 replaced a free cache with an explicit copy and two barriers per tile. The
 optimization log carries the full reading.
+
+K8 is the second negative result, and a close one. It is measured in its own
+three runs with the order `K0, K7, K8, K8, K7`: the later slots run hotter and
+at a lower clock, so each kernel is the mean of an early and a late slot, and
+"vs previous" is the same-run K8/K7 ratio (0.993-0.995). Loading the next tile
+into a second shared buffer while the current one is computed does hide load
+latency - with occupancy unchanged at 65.83%, the share of time with no
+eligible warp falls from 29.94% to 26.78% - but interleaving reads of one
+buffer with stores to the other halves the L1 hit rate (34.71% to 16.33%), and
+total elapsed cycles end up equal to K7's within 0.05%. An earlier form that
+held the prefetched values in registers needed 71 registers per thread instead
+of 64, which lowers the resident blocks per SM from four to three, and used
+2.7% more elapsed cycles than K7 in paired profiles; it is kept as
+`k8c1`-`k8c5`. `make test-k8` checks
+nonzero initial C, alpha/beta, empty reductions and tile boundaries for every
+K8 entry.
 
 ### Size sweep
 
@@ -98,13 +113,6 @@ the slanted roof and a register-only FMA loop defines the flat one. The rungs
 climb towards the ridge; K7 reaches 74% of the roof at its intensity and
 cuBLAS 72% of the compute roof. `profiling/plot.py` draws both figures from
 the CSVs and the exported profiles.
-
-K8 adds register prefetch and two shared-memory buffers. Its provisional
-configuration is 128×128×16 with 8×8 thread tiles and 32×64 warp tiles;
-`k8c1` retains K7's geometry as a structural control. `make test-k8` checks
-nonzero initial C, alpha/beta, empty reductions and tile boundaries.
-A full-power adapter and a repeated parameter search are required before
-publishing a K8 performance row or promoting its configuration as optimal.
 
 Boundary handling is done with guard branches rather than padding, so a kernel
 is tested on `4097×513×129` as well as divisible shapes. Passing these tests

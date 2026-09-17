@@ -433,52 +433,82 @@ bytes loaded plus bytes stored, the same accounting the profiler uses.
   still sits under the slanted, memory-bound roof, and K6 is just past the
   ridge (64.3 FLOP/byte). cuBLAS reaches 71.5% of the compute roof.
 
-## K8 - register prefetch and double buffering
+## K8 - double buffering
 
-- **Hypothesis**: issue global reads for tile t+1 into registers before
-  computing tile t, then publish those values in the other shared buffer.
-  This reduces block barriers from 2L to L, including the initial load,
-  where L is the number of K tiles. It may hide global-memory latency,
-  at the cost of twice the shared storage and longer register lifetimes.
-- **Prediction**, committed before measurement: the original K7 geometry
-  would reach 7600 GFLOP/s (6500-8400), and the best searched configuration
-  8200 (7200-9000). The resource tradeoff, rather than an assumed fraction
-  of cuBLAS, sets the range. A regression relative to K7 was explicitly
-  allowed by the hypothesis.
-- **Implementation**: ordinary global loads into registers, followed by
-  computation from the current shared tile, then stores to the alternate
-  tile and a block barrier. All threads participate in loads and barriers,
-  including boundary threads. No prefetch follows the final tile. This is
-  software prefetch, without `cp.async`.
-- **Configurations**: five candidates cover K7's geometry, a smaller
-  64-by-64 tile, maximum shared carveout, a wider 128-by-128 tile, and BK=32.
-  The current default is provisionally the wider tile. `k8c1` remains the
-  original-geometry control; no claim of optimality is made before a
-  power-qualified repeat of the search.
-- **Correctness**: all registered configurations pass the three standard
-  shapes. `make test-k8` adds 180 checks against a double-precision CPU
-  reference, including nonzero initial C, varying alpha/beta, K=0, aligned
-  loads, scalar tails and repeated buffer swaps. Compute Sanitizer reports
-  no memory errors or shared-memory hazards in the tested cases.
-- **Measurement status**: performance acceptance is pending. Full-power
-  adapter conditions were not established for the exploratory session, so
-  its timing rows are excluded from published results even when the cuBLAS
-  baseline check passed. Neither the reported power cap nor an in-band
-  baseline is a substitute for confirming the physical power supply.
-- **Profiling evidence**, collected under those exploratory conditions:
-  `k8_4096x4096x4096_20260916_123049.details.csv` and the matching K7
-  `...123052.details.csv` in `profiling/reports/rtx4060-laptop/`.
-  Registers per thread rise from 64 to 124, limiting blocks per SM from
-  four to two; achieved occupancy falls from 65.83% to 33.07%. Eligible
-  warps per scheduler fall from 3.08 to 1.79. L1 hit rate improves from
-  34.73% to 50.86%, showing the wider tile's reuse benefit.
-- **Waiting tradeoff**: the exported raw counters in `k8_stall_comparison.csv`
-  show lower barrier and long-scoreboard ratios (1.064114 to 0.240436 and
-  1.944354 to 0.246519 per issue-active normalization). These are profiler
-  ratios, not wall-time percentages. Reduced waiting does not prove an
-  overall speedup when fewer warps can remain resident. The resource counts
-  describe this binary; timing and stall behavior must be revalidated with
-  the required adapter before a final performance conclusion.
-- **Next validation**: confirm physical power conditions, commit a fresh
-  prediction, repeat the same candidate grid, commit the selected default,
-  and collect three independent cooled K0/K7/K8 comparisons plus ncu.
+- **Hypothesis**: K7 spends two block barriers per K tile, one after loading
+  the tile into shared memory and one after computing it. With two shared
+  buffers, the global loads for tile t+1 can be issued while tile t is
+  computed, and a single barrier per tile both publishes the next tile and
+  retires the readers of the current one - L barriers instead of 2L. If load
+  latency is part of what keeps warps from being eligible, the no-eligible
+  share should fall. The costs are twice the shared storage and whatever
+  extra state the staging needs.
+- **Two implementations**, both at K7's geometry (128×64×16, 8×4 thread
+  tiles, 32×32 warp tiles) unless noted:
+  - *register prefetch* (`k8c1`, plus `k8c2`-`k8c5`: a 64×64 tile, a maximum
+    shared-carveout hint, a 128×128 tile, and BK=32): loads land in registers,
+    the current tile is computed, then the values are stored into the other
+    buffer before the barrier. It needs 71 registers per thread against K7's
+    64. At 256 threads per block K7 exactly fills the register budget for four
+    blocks per SM, so the prefetch form drops to three
+    (`k8_4096x4096x4096_20260916_120437` against
+    `k7_4096x4096x4096_20260916_120440`: occupancy 49.57% against 65.80%).
+  - *direct stores* (`k8`, the default): the global loads for the next tile are
+    stored straight into the other buffer. Written with one load call site (the
+    loop starts one tile early), it compiles to 64 registers per thread, the
+    same as K7. A version with a separate initial load compiled to 71; the
+    register count follows the code shape, not only the data held.
+- **What the prefetch form showed**: at matched geometry its fewer warp cycles
+  per instruction (8.60 against 11.29) track its lower occupancy - across all
+  profiles this metric rises roughly in proportion to occupancy - and
+  occupancy divided by cycles per instruction is 5.76 against K7's 5.83. The
+  no-eligible share did not fall (30.78% against 29.97%), and it used 2.7% more
+  elapsed cycles than K7 for the same work. The earlier wider-tile default
+  (`k8c4`, 124 registers per thread, 33.07% occupancy;
+  `k8_4096x4096x4096_20260916_123049`) showed the same pattern more strongly.
+  Timings of the prefetch form were taken either before full-power supply
+  conditions were confirmed or with the cuBLAS baseline outside its band, so
+  they are not used as headline numbers; the searches are kept in
+  `tuning_k8_qualified.csv` and `tuning_k8_qualified_repeat.csv`.
+- **Prediction** for the direct form, committed before its final runs and
+  informed by exploratory runs of the same code: K8/K7 = 1.00 (0.985-1.015),
+  K8 about 8000 GFLOP/s (7800-8150); 64 registers, four resident blocks, about
+  65.8% occupancy; elapsed cycles within 1.5% of K7's; no-eligible share within
+  2 points of K7's. The reasoning: K7's loads are contiguous float4 streams,
+  limited by bytes rather than by request latency, so there should be little
+  latency to hide, and the direct form no longer pays for register staging.
+  Earlier predictions for the prefetch form (7600 GFLOP/s for K7's geometry
+  and 8200 for the best configuration; later 0.95-1.04 of K7) are superseded,
+  not deleted.
+- **Measurement design**: three runs after a 120 s cooldown, each in the order
+  K0, K7, K8, K8, K7. The later slots run hotter and at a lower clock (2460
+  down to 2370 MHz within a run), so each kernel is the mean of its two slot
+  medians and the ratio is taken within a run. All three K0 results are in
+  band.
+- **Measured** (`gemm_4096.csv`, tag `k8-final`, source `65ddb9912752`):
+
+  | Run | K0 | K7 (early, late) | K8 (early, late) | K8/K7 | K8/K0 |
+  |---|---|---|---|---|---|
+  | 1 | 9087.2 | 8006.3, 7860.5 | 7910.5, 7878.7 | 0.9951 | 86.9% |
+  | 2 | 9054.1 | 8002.0, 7762.7 | 7885.0, 7769.1 | 0.9930 | 86.4% |
+  | 3 | 9045.5 | 8000.6, 7785.7 | 7877.8, 7813.4 | 0.9940 | 86.7% |
+
+  K8 is **7845.6 GFLOP/s** (median of the per-run means, 0.86% range),
+  **0.994x** of K7 in the same runs, and 86.7% of cuBLAS.
+- **Evidence** (`k7_4096x4096x4096_20260916_222228` and
+  `k8_4096x4096x4096_20260916_222330`, both at 1.89 GHz): registers 64 and 64;
+  four resident blocks each; occupancy 65.83% for both; static shared memory
+  12.29 and 24.58 KB per block; elapsed cycles 41,720,191 and 41,740,176
+  (+0.05%); no-eligible share 29.94% and 26.78%; warp cycles per instruction
+  11.27 and 10.79; compute throughput 69.57% and 72.71%; L1 hit rate 34.71%
+  and 16.33%. On the roofline (`docs/img/roofline.png`) K8 sits at 55.1
+  FLOP/byte, 70.9% of the roof at that intensity (K7: 73.9%).
+- **Difference**: the throughput, register, occupancy and cycle predictions
+  held. The no-eligible prediction failed: it fell by 3.2 points at unchanged
+  occupancy, so double buffering does hide load latency, and "little latency
+  to hide" was too strong. The halved L1 hit rate was not predicted. The
+  direct form interleaves reads of one buffer with stores to the other, so
+  its working set spans both; the prefetch form, which stores after the
+  compute, kept a 35.67% hit rate but hid no latency. The same interleaving
+  produces both effects, and on this GPU they cancel: K8 matches K7 rather
+  than beating it.
