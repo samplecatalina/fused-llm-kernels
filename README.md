@@ -1,7 +1,7 @@
 # fused-llm-kernels
 
 An FP32 SGEMM optimization ladder for Ada (sm_89), from a naive kernel to warp
-tiling, plus fused Triton operators. Every step up the ladder is backed by
+tiling and double buffering, with fused Triton operators planned. Every step up the ladder is backed by
 Nsight Compute data rather than by an explanation of what should have happened.
 
 The technical route itself is well-trodden. What this repository tries to get
@@ -9,18 +9,18 @@ right is the engineering around it:
 
 - **Correctness on arbitrary shapes.** Every kernel accepts any `M/N/K`,
   including sizes that are not a multiple of the tile shape. Three shapes are
-  checked on every run: `4096³`, `4097×513×129`, and `64³`.
+  checked by `make test` (benchmarks check their selected shapes): `4096³`, `4097×513×129`, and `64³`.
 - **Measurement that survives an unsteady GPU clock.** Time-based warmup until
   the SM clock settles, per-iteration CUDA-event timing, median with p10/p90,
   and clock, power and clock-event state recorded with every result row.
 - **A roofline built from micro-benchmarks**, not from datasheet numbers.
 
 > **Status: in progress.** K1-K7 are implemented, measured and profiled; K7
-> reaches 88.0% of cuBLAS. K8 is not written yet. Every rung's prediction was recorded in
-> `docs/optimization-log.md` before its benchmark ran, and the log states
-> which predictions the measurements falsified. This README will not carry a
-> number that cannot be traced to a row in `results/` or to a report in
-> `profiling/reports/`.
+> reaches 88.0% of cuBLAS. K8 double buffering is implemented and passes
+> correctness and sanitizer checks, but its power-qualified performance
+> validation is pending. Exploratory timings are excluded from published
+> results because full-power supply conditions were not established.
+> Predictions and profiling evidence are documented in `docs/optimization-log.md`.
 
 ## Quick start
 
@@ -49,10 +49,10 @@ from its own run (`results/rtx4060-laptop/gemm_4096.csv`).
 |---|---|---|---|---|---|
 | K0 | cuBLAS baseline, timed through the same harness | - | 9115.1 | 100% | - |
 | K1 | naive: one thread per element of C | uncoalesced global access | 115.8 | 1.3% | - |
-| K2 | coalesced access (swap the thread-to-data mapping) | DRAM bandwidth | 845.5 | 9.3% | 7.30x |
-| K3 | shared-memory tiling (BM×BK / BK×BN) | shared bandwidth, low compute ratio | 757.6 | 8.3% | **0.90x** |
+| K2 | coalesced access (swap the thread-to-data mapping) | balanced compute and memory paths | 845.5 | 9.3% | 7.30x |
+| K3 | shared-memory tiling (BM×BK / BK×BN) | staging overhead and limited resident blocks | 757.6 | 8.3% | **0.90x** |
 | K4 | 1D thread tiling (TM results per thread) | register reuse | 1541.4 | 16.9% | 2.03x |
-| K5 | 2D thread tiling (TM×TN register block) | instruction scheduling | 4062.9 | 44.6% | 2.64x |
+| K5 | 2D thread tiling (TM×TN register block) | saturated memory request path | 4062.9 | 44.6% | 2.64x |
 | K6 | float4 vectorized loads, transposed A tile | latency and parallelism | 6899.5 | 75.9% | 1.70x |
 | K7 | warp tiling + parameter search (128×64×16, 8×4) | occupancy bounded by registers and shared memory | 8041.9 | 88.0% | 1.16x |
 
@@ -99,11 +99,12 @@ climb towards the ridge; K7 reaches 74% of the roof at its intensity and
 cuBLAS 72% of the compute roof. `profiling/plot.py` draws both figures from
 the CSVs and the exported profiles.
 
-Rungs not yet written:
-
-| Rung | What it adds | Bottleneck it targets | Status |
-|---|---|---|---|
-| K8 | double buffering (optional) | latency hiding | optional |
+K8 adds register prefetch and two shared-memory buffers. Its provisional
+configuration is 128×128×16 with 8×8 thread tiles and 32×64 warp tiles;
+`k8c1` retains K7's geometry as a structural control. `make test-k8` checks
+nonzero initial C, alpha/beta, empty reductions and tile boundaries.
+A full-power adapter and a repeated parameter search are required before
+publishing a K8 performance row or promoting its configuration as optimal.
 
 Boundary handling is done with guard branches rather than padding, so a kernel
 is tested on `4097×513×129` as well as divisible shapes. Passing these tests
@@ -148,8 +149,10 @@ is evidence for boundary handling, not a proof for every possible input.
 - Benchmark rows are refused when the code that produced them is not
   committed, carry the kernel's configuration, and are flagged when the cuBLAS
   run inside the same benchmark falls outside its run-to-run band.
-- Benchmarks are only valid on AC power, with the host power plan set to high
-  performance and no other GPU load running.
+- Benchmarks are only valid with the full-power adapter connected, with the host power plan set to high
+  performance and no other GPU load running. The reported GPU power limit and
+  an in-band cuBLAS check are necessary diagnostics; neither proves that the
+  physical adapter can supply the required power.
 
 `GFLOP/s = 2·M·N·K / t`.
 

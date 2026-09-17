@@ -9,7 +9,7 @@ understood (an Nsight Compute measurement behind every claim).
 
 Concretely:
 
-1. An FP32 SGEMM ladder from naive to warp tiling, measured at `4096³` against
+1. An FP32 SGEMM ladder from naive to double buffering, measured at `4096³` against
    cuBLAS through the same harness.
 2. Fused Triton operators - RMSNorm and online softmax - compared against both
    PyTorch eager and `torch.compile`.
@@ -81,7 +81,8 @@ for comparisons within the run, not as a headline result.
 
 ## 3. The GEMM ladder
 
-K1-K7 are implemented and measured. The evidence below is detailed in
+K1-K7 are implemented and measured. K8 is implemented and correctness-checked;
+power-qualified performance validation is pending. The evidence below is detailed in
 [the optimization log](optimization-log.md), with source CSVs under
 `results/rtx4060-laptop/` and counters under `profiling/reports/rtx4060-laptop/`.
 
@@ -95,12 +96,15 @@ K1-K7 are implemented and measured. The evidence below is detailed in
 | K5 | 2D register tiles | Memory path saturates; register use limits occupancy |
 | K6 | float4 loads and transposed A tile | Fewer instructions, but limited parallelism |
 | K7 | Warp tiles and parameter search | Smaller tiles improve occupancy at the cost of reuse |
-| K8 | Planned double buffering and register prefetch | Test latency hiding against added shared memory and register use |
+| K8 | Double buffering and register prefetch | Reduced global-load and barrier waits; added registers reduce occupancy |
 
 K3/K4 use 32-cubed tiles. In K4 a 128-by-128 output tile would need too
 many threads with only 1D thread tiling. K5/K6 use 128-by-128-by-16 tiles
 with 8-by-8 results per thread. K7's search selects 128-by-64-by-16,
-8-by-4 results per thread, and 32-by-32 warp tiles.
+8-by-4 results per thread, and 32-by-32 warp tiles. K8's provisional configuration from exploratory work is 128-by-128-by-16, 8-by-8 thread tiles and 32-by-64 warp tiles;
+its K7-geometry control is retained separately as `k8c1`. The grid must be
+repeated under confirmed full-power supply conditions before selecting a
+publishable winner.
 
 **Negative result: K3.** Explicit shared-memory staging regresses relative
 to K2. The profiles show that K2 already benefits from high L1 hit rates;

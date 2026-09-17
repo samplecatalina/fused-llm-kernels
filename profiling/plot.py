@@ -158,11 +158,23 @@ def plot_roofline(results, reports, out):
     ridge = compute / bandwidth
 
     headline = read(results / "gemm_4096.csv")
-    clean = [r for r in headline if not r["source_rev"].endswith("-dirty")]
+    clean = [r for r in headline if not r["source_rev"].endswith("-dirty")
+             and r.get("baseline_check") != "out-of-band"]
     rungs = []
-    for k in ["k1", "k2", "k3", "k4", "k5", "k6", "k7"]:
-        vals = [float(r["gflops_median"]) for r in clean if r["kernel"] == k]
-        report = headline_report(reports, k)
+    for k in ["k1", "k2", "k3", "k4", "k5", "k6", "k7", "k8"]:
+        # Keep the original published K1-K7 runs; later K7 controls belong
+        # to the K8 experiment. K8 uses only its final, fixed configuration.
+        selected = [r for r in clean if r["kernel"] == k
+                    and (r["tag"] == "k8-qualified" if k == "k8"
+                         else not r["tag"].startswith("k8-"))]
+        vals = [float(r["gflops_median"]) for r in selected]
+        if not vals:
+            continue
+        # Later K7 profiles are controls for the K8 experiment. Pair the
+        # published K7 timing with its original profile on this device.
+        original_k7 = reports / "k7_20260916_002316.details.csv"
+        report = (str(original_k7) if k == "k7" and original_k7.exists()
+                  else headline_report(reports, k))
         rungs.append((k.upper(), ncu_intensity(report), statistics.median(vals)))
 
     fig, ax = plt.subplots(figsize=(8, 5), facecolor=SURFACE)

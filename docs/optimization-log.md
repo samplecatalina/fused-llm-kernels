@@ -432,3 +432,53 @@ bytes loaded plus bytes stored, the same accounting the profiler uses.
   32.9%, K3 29.3%, K4 54.3%, K5 40.3%, K6 54.6%, K7 73.9%. Every rung but K6
   still sits under the slanted, memory-bound roof, and K6 is just past the
   ridge (64.3 FLOP/byte). cuBLAS reaches 71.5% of the compute roof.
+
+## K8 - register prefetch and double buffering
+
+- **Hypothesis**: issue global reads for tile t+1 into registers before
+  computing tile t, then publish those values in the other shared buffer.
+  This reduces block barriers from 2L to L, including the initial load,
+  where L is the number of K tiles. It may hide global-memory latency,
+  at the cost of twice the shared storage and longer register lifetimes.
+- **Prediction**, committed before measurement: the original K7 geometry
+  would reach 7600 GFLOP/s (6500-8400), and the best searched configuration
+  8200 (7200-9000). The resource tradeoff, rather than an assumed fraction
+  of cuBLAS, sets the range. A regression relative to K7 was explicitly
+  allowed by the hypothesis.
+- **Implementation**: ordinary global loads into registers, followed by
+  computation from the current shared tile, then stores to the alternate
+  tile and a block barrier. All threads participate in loads and barriers,
+  including boundary threads. No prefetch follows the final tile. This is
+  software prefetch, without `cp.async`.
+- **Configurations**: five candidates cover K7's geometry, a smaller
+  64-by-64 tile, maximum shared carveout, a wider 128-by-128 tile, and BK=32.
+  The current default is provisionally the wider tile. `k8c1` remains the
+  original-geometry control; no claim of optimality is made before a
+  power-qualified repeat of the search.
+- **Correctness**: all registered configurations pass the three standard
+  shapes. `make test-k8` adds 180 checks against a double-precision CPU
+  reference, including nonzero initial C, varying alpha/beta, K=0, aligned
+  loads, scalar tails and repeated buffer swaps. Compute Sanitizer reports
+  no memory errors or shared-memory hazards in the tested cases.
+- **Measurement status**: performance acceptance is pending. Full-power
+  adapter conditions were not established for the exploratory session, so
+  its timing rows are excluded from published results even when the cuBLAS
+  baseline check passed. Neither the reported power cap nor an in-band
+  baseline is a substitute for confirming the physical power supply.
+- **Profiling evidence**, collected under those exploratory conditions:
+  `k8_4096x4096x4096_20260916_123049.details.csv` and the matching K7
+  `...123052.details.csv` in `profiling/reports/rtx4060-laptop/`.
+  Registers per thread rise from 64 to 124, limiting blocks per SM from
+  four to two; achieved occupancy falls from 65.83% to 33.07%. Eligible
+  warps per scheduler fall from 3.08 to 1.79. L1 hit rate improves from
+  34.73% to 50.86%, showing the wider tile's reuse benefit.
+- **Waiting tradeoff**: the exported raw counters in `k8_stall_comparison.csv`
+  show lower barrier and long-scoreboard ratios (1.064114 to 0.240436 and
+  1.944354 to 0.246519 per issue-active normalization). These are profiler
+  ratios, not wall-time percentages. Reduced waiting does not prove an
+  overall speedup when fewer warps can remain resident. The resource counts
+  describe this binary; timing and stall behavior must be revalidated with
+  the required adapter before a final performance conclusion.
+- **Next validation**: confirm physical power conditions, commit a fresh
+  prediction, repeat the same candidate grid, commit the selected default,
+  and collect three independent cooled K0/K7/K8 comparisons plus ncu.
