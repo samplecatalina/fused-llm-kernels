@@ -210,9 +210,14 @@ kernel) and `torch.compile`, over `hidden ∈ {1024, 2048, 4096, 8192}` with
 `rows = 4096`; `ε = 1e-6` everywhere. `num_warps = 4` from a bounded search.
 Optional extension: the backward pass.
 
-**Online softmax.** Single-pass running-max formulation compared against
-`torch.softmax`. The point of interest is the derivation of the reduction in
-memory traffic from three passes to one, checked against measured bandwidth.
+**Row-wise softmax (measured).** One program per row: the row is loaded once
+with masked positions as `-inf`, and the maximum and normalizer are parallel
+reductions over the loaded values - what the online normalizer achieves with
+a recurrence, without the sequential dependency. Compared against the naive
+eager form (five launches, about four times the traffic of one pass),
+`torch.softmax` (one kernel, with a dispatch switch between hidden 2048 and
+2049) and `torch.compile`, reported both as time ratios and as effective
+bandwidth against the measured roof. `num_warps = 4` from a bounded search.
 
 ## 7. Simplified fused attention (stretch)
 

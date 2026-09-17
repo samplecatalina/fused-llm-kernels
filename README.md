@@ -19,9 +19,9 @@ right is the engineering around it:
 > **Status: in progress.** The K1-K8 GEMM ladder is implemented, measured and
 > profiled; K7 reaches 88.0% of cuBLAS, and K8 (double buffering) is a
 > documented negative result at 0.994x of K7. The fused bias + SiLU epilogue
-> is measured over K = 32..8192. Two Triton operators, fused bias + SiLU and
-> RMSNorm forward, are measured against eager PyTorch, the native module and
-> `torch.compile`; online softmax is next.
+> is measured over K = 32..8192. Three Triton operators - fused bias + SiLU,
+> RMSNorm forward and row-wise softmax - are measured against eager PyTorch,
+> the native fused kernels and `torch.compile`.
 > Predictions and profiling evidence are documented in `docs/optimization-log.md`.
 
 ## Quick start
@@ -186,6 +186,27 @@ At hidden 1024, `torch.compile` switches to a different reduction kernel and
 the call is 2.2x slower than the handwritten one, although the kernel itself
 takes the same 75 us; the difference is outside the kernel. The optimization
 log has the profiles.
+
+### Triton: row-wise softmax
+
+![Effective bandwidth of four softmax implementations](docs/img/triton_softmax.png)
+
+The naive softmax - row max, subtract, exp, row sum, divide - launches five
+kernels and moves about 32 bytes per element; `torch.softmax` and
+`torch.compile` launch one kernel each and move about 7, like the
+handwritten kernel, which loads each row once and reduces it to its maximum
+and normalizer in place. From hidden 2048 up the three single-pass
+implementations are within 9% of each other (native/Triton 0.91-0.98,
+compile/Triton 1.02-1.04) at 194-207 GB/s effective, and the naive form is
+3.27-3.74x slower (`results/rtx4060-laptop/triton_softmax.csv`). At hidden
+1024, `torch.softmax` is faster than the Triton call (0.69x) although both
+kernels take the same 70-75 us in the profiles: the difference is host-side.
+
+Across the three operators the pattern is the same. Each is bound by bytes;
+the fused versions move the minimum traffic at the measured roof whatever
+their register count or occupancy, the eager forms pay close to the byte
+ratio of their extra passes, and handwritten Triton ties, but does not
+beat, the fused kernels PyTorch already ships.
 
 ### Roofline
 

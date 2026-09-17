@@ -189,6 +189,11 @@ TRITON_PLOTS = {
                  ("native", "torch.nn.RMSNorm (1 launch)"),
                  ("compile", "torch.compile (1 launch)"),
                  ("eager", "eager x * rsqrt(mean(x^2) + eps) * w (6 launches)")]),
+    "softmax": ("Softmax: three single-pass kernels at the roof",
+                [("triton", "Triton, fused (1 launch)"),
+                 ("native", "torch.softmax (1 launch)"),
+                 ("compile", "torch.compile (1 launch)"),
+                 ("eager", "eager max, sub, exp, sum, div (5 launches)")]),
 }
 
 
@@ -222,7 +227,7 @@ def plot_triton(rows, roof_gbs, out, op):
     ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{int(v)}"))
     ax.xaxis.set_minor_formatter(NullFormatter())
     ax.set_yscale("log")
-    ax.set_yticks([50, 100, 200, 400, 600])
+    ax.set_yticks([50, 100, 200, 400, 600, 800])
     ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:,.0f}"))
     ax.yaxis.set_minor_formatter(NullFormatter())
     ax.set_xlabel("hidden (rows = 4096)", fontsize=8, color=TEXT2)

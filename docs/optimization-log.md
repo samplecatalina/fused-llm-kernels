@@ -728,3 +728,71 @@ bytes loaded plus bytes stored, the same accounting the profiler uses.
     occupancy - but that kernel takes 75 us, the same as the handwritten one.
     The extra 50 us of the timed call lie outside the kernel; these profiles
     do not show where.
+
+## Triton - row-wise softmax
+
+- **Hypothesis**: softmax, computed stably as `exp(x - max) / sum(exp(x - max))`,
+  is bound by bytes like the two operators before it. Counting kernels first
+  (profiler, then single-call ncu): the naive eager form launches five
+  kernels - max, subtract, exp, sum, divide - writing three full-size
+  tensors, about 32 bytes per element, four times a single load-and-store
+  pass rather than the three times often quoted. `torch.softmax` launches one
+  kernel on either of its two paths (`softmax_warp_forward` up to hidden 2048,
+  `cunn_SoftMaxForwardReg` from 2049), and `torch.compile` one reduction
+  kernel; both move about 7 bytes per element. The handwritten kernel can
+  therefore tie them and beat the naive form by about the byte ratio.
+- **Implementation**: one program per row. The row is loaded once with masked
+  positions as `-inf`; the row maximum and the normalizer are parallel
+  reductions over the loaded values, and `exp(x - max)` is computed once for
+  both the sum and the output. This gives what the online normalizer's
+  recurrence gives - no second pass over memory for the normalizer - without
+  a sequential dependency between elements. A bounded `num_warps` search
+  (`tuning_triton_softmax.csv`) gave 0.660, 0.664, 0.667 and 0.666 ms for
+  2, 4, 8 and 16; 2 was 0.6% faster than 4, under the 1% required to change
+  the default, so 4 is kept. Correctness: every implementation on nine shapes
+  (including both sides of the 2048/2049 dispatch boundary) and 89 targeted
+  checks (logits around 1e4, `-inf` entries, all `-inf` rows giving NaN
+  exactly where `torch.softmax` does, views, `out=`).
+- **Prediction** (committed before the formal runs, informed by the probes and
+  the two earlier operators): Triton 0.33 / 0.63 / 1.26 ms at hidden
+  2048 / 4096 / 8192 at 180-260 GB/s; native/Triton and compile/Triton 1.0
+  (0.9-1.15 and 0.9-1.1), including at 2048, where `torch.softmax` runs at 48%
+  occupancy; eager/Triton 3.5 (3.0-4.3) at 2048 and 4.0 (3.4-4.6) above. At
+  hidden 1024: Triton 0.058 ms, native 1.1 (0.9-1.5), compile 2.0 (1.5-2.6),
+  eager 5.5 (4-8).
+- **Measured** (`triton_softmax.csv`, tag `triton-final`, rows = 4096, each
+  implementation in an early and a late slot):
+
+  | hidden | Triton ms | Triton GB/s | native / Triton | compile / Triton | eager / Triton |
+  |---|---|---|---|---|---|
+  | 1024 | 0.057 | 585 (292%) | **0.69** | 2.26 | 5.75 |
+  | 2048 | 0.345 | 194 (97%) | 0.91 | 1.04 | 3.27 |
+  | 4096 | 0.662 | 203 (101%) | 0.97 | 1.02 | 3.61 |
+  | 8192 | 1.297 | 207 (103%) | 0.98 | 1.02 | 3.74 |
+
+  ![Effective bandwidth of four softmax implementations](img/triton_softmax.png)
+
+- **Evidence** (`triton_softmax_<impl>_4096x4096_20260917_024*` and
+  `..._4096x1024_20260917_025*`, single calls): at 4096 × 4096 the Triton
+  kernel takes 479-484 us at 232-233 GB/s (6.7 bytes per element, 56
+  registers per thread, 72% occupancy), `cunn_SoftMaxForwardReg` 547-556 us
+  (7.2-7.3 bytes, 1024 threads per block, 65%), inductor's reduction kernel
+  488-528 us (6.8-7.2 bytes, 94%). Eager's three writing kernels move
+  7.0-7.1 bytes per element each and its two reductions 4.0-4.3. At
+  4096 × 1024 every kernel of every implementation takes 70-86 us:
+  `softmax_warp_forward` 73-75 us, the Triton kernel 70-73 us, inductor's
+  persistent reduction (`triton_per_...`, 32 threads per block, 80 registers,
+  46% occupancy) 71-73 us.
+- **Difference**: every cell but one held.
+  - The miss is `torch.softmax` at hidden 1024: 0.69x of the Triton call.
+    Its kernel takes the same time as the Triton kernel in the profiles, so
+    the 18 us between the two timed calls is spent outside the kernel,
+    on the host; these profiles do not show which part of the call path it
+    is. The same holds, larger, for `torch.compile` at that width (about
+    70 us outside a 71-73 us kernel).
+  - `torch.softmax` at 2048 runs at 48% occupancy and is not slower than the
+    96%-occupancy Triton kernel (0.91x). As with RMSNorm, occupancy is not
+    the constraint for a kernel bound by bytes.
+  - Eager is 3.61-3.74x slower at 4096 and 8192, against a byte ratio of
+    about (4 + 7 + 7 + 4 + 7) / 7 = 4.1; its reductions are cheaper than a
+    full load-and-store pass.
