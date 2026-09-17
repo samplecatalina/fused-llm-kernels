@@ -656,3 +656,75 @@ bytes loaded plus bytes stored, the same accounting the profiler uses.
   - At hidden 4096 the same gap between timed and profiled time is 0.05 ms
     for Triton and about 0.31 ms for both eager paths; the profiles are single
     calls, so these differences are indicative only.
+
+## Triton - RMSNorm forward
+
+- **Hypothesis**: `y = x * rsqrt(mean(x²) + eps) * w` reduces each row to one
+  number and scales the row by it; the arithmetic per element is small, so
+  the operator is bound by bytes like bias + SiLU. Counting kernels before
+  writing any code (PyTorch profiler, then single-call ncu at 4096 × 4096):
+  the eager expression launches six kernels - pow, a mean reduction, add eps
+  and rsqrt on a rows × 1 tensor, and two broadcast multiplies - with four
+  full-size passes, about 28 bytes per element. `torch.nn.RMSNorm` (the same
+  path as `F.rms_norm`) launches one `vectorized_layer_norm_kernel`, and
+  `torch.compile` one reduction kernel. Both move about 7 bytes per element,
+  like any single load-and-store pass: neither reads the row twice. A
+  handwritten Triton kernel therefore has no traffic to save over them, and
+  the expected result is a tie, with eager about 3.5x slower.
+- **Implementation**: one program per row. The row is loaded once (masked
+  positions load as 0), reduced to `sum(x*x) / n_cols`, and the loaded values
+  are scaled and stored; the weight is indexed by column. A bounded search
+  over `num_warps` 2/4/8/16 at 4096 × 4096 (`tuning_triton_rmsnorm.csv`) gave
+  0.661, 0.659, 0.665 and 0.666 ms: 4 is kept. `torch.nn.RMSNorm` is timed
+  with a weight that does not require a gradient. All four implementations
+  are called once per shape before timing, so compilation and module setup
+  are not timed. Correctness: every implementation on seven shapes, and 100
+  targeted checks (all-zero rows, squares that underflow or overflow float32,
+  views, `out=`).
+- **Prediction** (committed before the formal runs, informed by the probes
+  above and by the bias + SiLU results): Triton 0.31 / 0.60 / 1.20 ms at
+  hidden 2048 / 4096 / 8192 at 180-260 GB/s; native/Triton 1.0 (0.9-1.15),
+  compile/Triton 1.0 (0.9-1.1), eager/Triton 3.6 (3.0-4.3). At hidden 1024:
+  Triton 0.06 ms, native 1.3 (1.0-1.7), compile 1.25 (1.0-1.5), eager 7.5
+  (5-10), expecting about 30 us of host time per eager launch.
+- **Measured** (`triton_rmsnorm.csv`, tag `triton-final`, rows = 4096, each
+  implementation in an early and a late slot; effective bandwidth is 8 bytes
+  per element over the median time):
+
+  | hidden | Triton ms | Triton GB/s | native / Triton | compile / Triton | eager / Triton |
+  |---|---|---|---|---|---|
+  | 1024 | 0.058 | 583 (291%) | 1.25 | **2.20** | **4.89** |
+  | 2048 | 0.334 | 201 (100%) | 0.95 | 1.05 | **2.95** |
+  | 4096 | 0.634 | 212 (106%) | 0.97 | 1.02 | 3.43 |
+  | 8192 | 1.268 | 212 (106%) | 1.01 | 1.01 | 3.48 |
+
+  ![Effective bandwidth of four RMSNorm implementations](img/triton_rmsnorm.png)
+
+- **Evidence** (`triton_rmsnorm_<impl>_4096x4096_20260917_014*` and
+  `..._4096x1024_20260917_01[45]*`, single calls, each profile holding the
+  untimed call and the timed one): at 4096 × 4096 the three fused kernels
+  take 494-509 us at 228-233 GB/s, 6.8-6.9 bytes per element. Their
+  resources differ widely - the Triton kernel holds 60 registers per thread
+  and reaches 63% occupancy, `vectorized_layer_norm_kernel` 40 registers and
+  94%, inductor's reduction kernel (256 threads per block) 30 registers and
+  89% - and their times do not. Eager's pow and multiplies take 475-506 us
+  each at 231-240 GB/s, its mean reduction 273-276 us (4 bytes per element:
+  a load with a rows × 1 result), and the two small kernels 2 us each.
+- **Difference**:
+  - *The fused kernels*: the tie held at every width from 2048 up. A memory-
+    bound kernel runs at the bandwidth roof whatever its register count or
+    occupancy; the 63% occupancy of the handwritten kernel costs nothing
+    here.
+  - *Eager*: 3.43-3.48x at 4096 and 8192, close to the byte ratio (four
+    passes of 7 + 4 + 7 + 7 bytes against one of 7). At 2048, 2.95x is just
+    under the predicted range. At 1024, 4.89x is under it: the eager timed
+    median (0.282 ms) is no larger than the sum of its profiled kernels
+    (about 0.30 ms), so there is no per-launch host cost of the size assumed.
+    The extra host time seen for eager bias + SiLU at 1024 is not a fixed
+    cost per launch.
+  - *torch.compile at 1024*: 2.20x, outside the range. Inductor emits a
+    different kernel at this width - `triton_per_fused_...`, a persistent
+    reduction with 32 threads per block, 78 registers per thread and 45%
+    occupancy - but that kernel takes 75 us, the same as the handwritten one.
+    The extra 50 us of the timed call lie outside the kernel; these profiles
+    do not show where.

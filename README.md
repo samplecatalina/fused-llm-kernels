@@ -19,9 +19,9 @@ right is the engineering around it:
 > **Status: in progress.** The K1-K8 GEMM ladder is implemented, measured and
 > profiled; K7 reaches 88.0% of cuBLAS, and K8 (double buffering) is a
 > documented negative result at 0.994x of K7. The fused bias + SiLU epilogue
-> is measured over K = 32..8192. The first Triton operator, fused bias + SiLU,
-> is measured against eager PyTorch and `torch.compile`; RMSNorm and online
-> softmax are next.
+> is measured over K = 32..8192. Two Triton operators, fused bias + SiLU and
+> RMSNorm forward, are measured against eager PyTorch, the native module and
+> `torch.compile`; online softmax is next.
 > Predictions and profiling evidence are documented in `docs/optimization-log.md`.
 
 ## Quick start
@@ -165,6 +165,27 @@ the eager paths carry host-side time beyond their kernels that does not
 shrink with them. `torch.compile` is within 5% of the handwritten kernel from
 hidden 2048 up and 26% slower at 1024, where its wrapper is a visible part of
 a 76 us call. The optimization log has the profiles.
+
+### Triton: RMSNorm forward
+
+![Effective bandwidth of four RMSNorm implementations](docs/img/triton_rmsnorm.png)
+
+RMSNorm reduces each row to its mean square and scales the row by it. Eager
+PyTorch written out launches six kernels and makes four full-size passes;
+`torch.nn.RMSNorm` and `torch.compile` each launch one kernel that loads the
+row once, and so does the handwritten Triton kernel. Counting that first
+predicted a tie between the three fused versions, and that is what the
+measurement shows from hidden 2048 up: native/Triton 0.95-1.01,
+compile/Triton 1.01-1.05, all at 201-212 GB/s effective, while eager is
+2.95-3.48x slower (`results/rtx4060-laptop/triton_rmsnorm.csv`). The three
+fused kernels hold 30, 40 and 60 registers per thread and reach 89%, 94% and
+63% occupancy, and take the same time: for a kernel bound by bytes, occupancy
+is not the constraint.
+
+At hidden 1024, `torch.compile` switches to a different reduction kernel and
+the call is 2.2x slower than the handwritten one, although the kernel itself
+takes the same 75 us; the difference is outside the kernel. The optimization
+log has the profiles.
 
 ### Roofline
 

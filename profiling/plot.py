@@ -178,15 +178,24 @@ def plot_epilogue(rows, out):
     return speedups
 
 
-TRITON_IMPLS = [("triton", "Triton, fused (1 launch)"),
-                ("compile", "torch.compile (1 launch)"),
-                ("eager", "eager silu(x + b) (2 launches)"),
-                ("eager_composite", "eager x + b, sigmoid, mul (3 launches)")]
+TRITON_PLOTS = {
+    "bias_silu": ("SiLU(x + bias): fused kernels move the minimum traffic at the roof",
+                  [("triton", "Triton, fused (1 launch)"),
+                   ("compile", "torch.compile (1 launch)"),
+                   ("eager", "eager silu(x + b) (2 launches)"),
+                   ("eager_composite", "eager x + b, sigmoid, mul (3 launches)")]),
+    "rmsnorm": ("RMSNorm: three single-pass kernels at the roof, eager 3-3.5x slower",
+                [("triton", "Triton, fused (1 launch)"),
+                 ("native", "torch.nn.RMSNorm (1 launch)"),
+                 ("compile", "torch.compile (1 launch)"),
+                 ("eager", "eager x * rsqrt(mean(x^2) + eps) * w (6 launches)")]),
+}
 
 
-def plot_triton(rows, roof_gbs, out):
+def plot_triton(rows, roof_gbs, out, op):
     """Effective bandwidth (8 bytes per element over the median time) per
     implementation against hidden, each point the mean of two slots."""
+    title, impls = TRITON_PLOTS[op]
     by = {}
     for r in rows:
         if r["tag"] != "triton-final":
@@ -197,7 +206,7 @@ def plot_triton(rows, roof_gbs, out):
     style(ax)
     colors = SERIES + [TEXT2]
     means = {}
-    for (impl, label), color in zip(TRITON_IMPLS, colors):
+    for (impl, label), color in zip(impls, colors):
         pts = sorted((h, sum(v) / len(v)) for h, v in by.get(impl, {}).items())
         if not pts:
             continue
@@ -206,8 +215,8 @@ def plot_triton(rows, roof_gbs, out):
         ax.plot(xs, ys, color=color, linewidth=2, marker="o", markersize=5,
                 markeredgecolor=SURFACE, markeredgewidth=1.5, label=label, zorder=3)
     ax.axhline(roof_gbs, color=REF, linewidth=1, zorder=1)
-    ax.text(8192, roof_gbs * 1.04, f"bandwidth roof {roof_gbs:.0f} GB/s",
-            fontsize=7, color=TEXT2, ha="right")
+    ax.text(8192, roof_gbs * 0.96, f"bandwidth roof {roof_gbs:.0f} GB/s",
+            fontsize=7, color=TEXT2, ha="right", va="top")
     ax.set_xscale("log", base=2)
     ax.set_xticks([1024, 2048, 4096, 8192])
     ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{int(v)}"))
@@ -219,8 +228,7 @@ def plot_triton(rows, roof_gbs, out):
     ax.set_xlabel("hidden (rows = 4096)", fontsize=8, color=TEXT2)
     ax.set_ylabel("effective bandwidth, GB/s (8 bytes per element)", fontsize=8,
                   color=TEXT2)
-    ax.set_title("SiLU(x + bias): fused kernels move the minimum traffic at the roof",
-                 loc="left", fontsize=11, color=TEXT)
+    ax.set_title(title, loc="left", fontsize=11, color=TEXT)
     ax.legend(frameon=False, fontsize=8, labelcolor=TEXT2, loc="upper right")
     fig.tight_layout()
     fig.savefig(out, dpi=150, facecolor=SURFACE)
@@ -350,12 +358,14 @@ def main():
                                  img / "epilogue.png")
         for k, v in speedups.items():
             print(f"epilogue K={k}: {v:.3f}x")
-    if (results / "triton_bias_silu.csv").exists() and (results / "roofline.csv").exists():
+    for op in TRITON_PLOTS:
+        if not (results / f"triton_{op}.csv").exists() or not (results / "roofline.csv").exists():
+            continue
         roof = {r["bench"]: r for r in read(results / "roofline.csv")}
-        means = plot_triton(read(results / "triton_bias_silu.csv"),
-                            float(roof["copy_f4"]["gb_per_s"]), img / "triton_bias_silu.png")
+        means = plot_triton(read(results / f"triton_{op}.csv"),
+                            float(roof["copy_f4"]["gb_per_s"]), img / f"triton_{op}.png", op)
         for impl, pts in means.items():
-            print(f"triton {impl}: " + ", ".join(f"{h}: {g:.1f}" for h, g in pts.items()))
+            print(f"triton {op} {impl}: " + ", ".join(f"{h}: {g:.1f}" for h, g in pts.items()))
     if (results / "roofline.csv").exists():
         b, c, r, rungs = plot_roofline(results, reports, img / "roofline.png")
         print(f"roofline: bandwidth {b:.1f} GB/s, compute {c:.1f} GFLOP/s, ridge {r:.1f} FLOP/byte")

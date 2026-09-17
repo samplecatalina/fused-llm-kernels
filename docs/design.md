@@ -15,7 +15,8 @@ Concretely:
    against the same GEMM followed by a separate element-wise pass, over the
    inner dimension K.
 3. Fused Triton operators - bias + SiLU, RMSNorm and online softmax -
-   compared against both PyTorch eager and `torch.compile`.
+   compared against PyTorch eager, the native fused module where one exists,
+   and `torch.compile`.
 4. Stretch: a simplified fused attention forward pass.
 
 **Non-goals**, stated explicitly to bound the scope:
@@ -201,10 +202,13 @@ block, bias indexed by column. Compared against eager `silu(x + b)`, eager
 `t = x + b; t * sigmoid(t)` and `torch.compile`, for `rows = 4096`,
 `hidden ∈ {1024, 2048, 4096, 8192}`. `num_warps = 4` from a bounded search.
 
-**RMSNorm forward.** One program per row, `y = x * rsqrt(mean(x²) + ε) * w`,
-with `BLOCK_SIZE = next_pow2(hidden)` and masking. Benchmarked over
-`hidden ∈ {1024, 2048, 4096, 8192}` with `rows = 4096`, against both PyTorch
-eager and `torch.compile`. Optional extension: the backward pass.
+**RMSNorm forward (measured).** One program per row,
+`y = x * rsqrt(mean(x²) + ε) * w`, with `BLOCK_SIZE = next_pow2(hidden)` and
+masking; the row is loaded once and scaled after the reduction. Compared
+against the eager expression (six launches), `torch.nn.RMSNorm` (one fused
+kernel) and `torch.compile`, over `hidden ∈ {1024, 2048, 4096, 8192}` with
+`rows = 4096`; `ε = 1e-6` everywhere. `num_warps = 4` from a bounded search.
+Optional extension: the backward pass.
 
 **Online softmax.** Single-pass running-max formulation compared against
 `torch.softmax`. The point of interest is the derivation of the reduction in
