@@ -581,3 +581,78 @@ bytes loaded plus bytes stored, the same accounting the profiler uses.
   - *What held*: the difference `e0 - e1` is flat at 0.52-0.59 ms for
     K <= 512 and matches the profiled pass, so fusion removes a fixed,
     K-independent cost, and M and N do not enter the gain.
+
+## Triton - fused bias + SiLU
+
+- **Hypothesis**: `SiLU(x + bias)` on a rows × hidden tensor is a pure memory
+  mover: one add, one exponential and a multiply per element. Its time should
+  be the bytes each implementation moves divided by the bandwidth: 8 bytes per
+  element fused (load x, store y), 16 for eager `silu(x + b)` (two launches
+  and an intermediate), 28 for eager `t = x + b; t * sigmoid(t)` (three
+  launches). The bias is loaded from L1. Fused kernels should run at the
+  roof, and the eager ratios should approach 2 and 3.5.
+- **Implementation**: one Triton program per row; column offsets
+  `arange(0, BLOCK)` with `BLOCK = next_pow2(hidden)`, masked to hidden; the
+  bias is indexed by the column alone. The wrapper accepts any tensor whose
+  rows are contiguous (row stride and storage offset are honoured) and
+  rejects the rest rather than copying. `num_warps` was chosen by a bounded
+  search at 4096 × 4096 (`tuning_triton_bias_silu.csv`): 2, 4, 8 and 16 took
+  0.655, 0.649, 0.658 and 0.667 ms, so 4 is kept; the spread is 2.8%, as
+  expected for a kernel bound by bytes rather than by occupancy.
+- **Harness**: `triton_kernels/bench.py` applies the C++ harness's rules -
+  a float64 reference check before timing, time-based warmup until the SM
+  clock settles, per-iteration CUDA-event timing with median/p10/p90,
+  clock and power state per row, refusal of rows from uncommitted code. The
+  result tensor is allocated inside the timed region for every
+  implementation; `torch.compile` is compiled before warmup. The PyTorch wheel
+  carries sm_86 binaries, which run on this sm_89 part; eager numbers are for
+  those binaries. Correctness: eight implementations on seven shapes
+  (including 4097 × 513, 7 × 8191 and 2 × 131072), and 67 targeted checks
+  (both SiLU tails, views, `out=`, argument checks).
+- **Prediction** (committed before the formal runs, informed by an earlier
+  single-shot probe and a short smoke run): for hidden 2048-8192, Triton at
+  180-240 GB/s effective bandwidth, eager/Triton 1.9 (1.6-2.2), composite/Triton
+  3.0 (2.5-3.5), compile/Triton 1.0 (0.9-1.15). For hidden 1024, Triton
+  0.17 ms (0.12-0.25) with the same ratio ranges, slightly wider.
+- **Measured** (`triton_bias_silu.csv`, tag `triton-final`, rows = 4096, each
+  implementation in an early and a late slot; effective bandwidth is
+  8 bytes per element over the median time, against the 200.6 GB/s roof):
+
+  | hidden | Triton ms | Triton GB/s | compile / Triton | eager / Triton | composite / Triton |
+  |---|---|---|---|---|---|
+  | 1024 | 0.060 | 558 (278%) | 1.26 | **3.70** | **6.56** |
+  | 2048 | 0.341 | 197 (98%) | 1.05 | 1.85 | 3.26 |
+  | 4096 | 0.655 | 205 (102%) | 1.03 | 1.95 | 3.43 |
+  | 8192 | 1.296 | 207 (103%) | 1.00 | 2.01 | 3.46 |
+
+  ![Effective bandwidth per implementation](img/triton_bias_silu.png)
+
+- **Evidence** (`triton_<impl>_4096x4096_20260917_004*` and
+  `triton_<impl>_4096x1024_20260917_004*`, single-call profiles): at
+  4096 × 4096 every kernel moves 217-240 GB/s - Triton's `bias_silu_kernel`
+  216 GB/s at 9% compute throughput, inductor's
+  `triton_poi_fused_add_silu_0` 219-231 GB/s, eager's broadcast add (a
+  non-vectorized `elementwise_kernel`) 240 GB/s and its `silu_kernel` 231 GB/s,
+  and the composite's add, sigmoid and multiply 235, 217 and 224 GB/s. The
+  multiply loads two tensors and takes 868 us against about 500 for the
+  others. At 4096 × 1024 every 8-byte kernel takes 74-81 us and the multiply
+  154 us.
+- **Difference**:
+  - *Hidden 2048-8192*: every prediction held. The fused kernels move their
+    minimum traffic at the roof; eager pays for its extra passes almost
+    exactly in bytes (2.0 and 3.5 at hidden 8192).
+  - *Hidden 1024*: every prediction failed. Two effects, both visible in the
+    profiles. Each kernel runs about twice as fast per element as at hidden
+    4096 (74 us against 150 us per 4.2 M elements), for every implementation
+    alike; the L2 hit rate is about 50% at both sizes, so this data does not
+    show why. And the eager paths spend more than the sum of their kernels:
+    their timed medians exceed the profiled kernel durations by 0.07 ms
+    (eager) and 0.09 ms (composite), while Triton's and compile's do not.
+    Once the kernels shrink to 74 us, that host-side cost is a large share,
+    and the ratios reach 3.7 and 6.6. The 6.6 is the kind of number that
+    usually indicates a weak baseline; here the baseline is the ordinary
+    eager expression, and the ratio is specific to small tensors.
+    compile/Triton at 1.26 is inductor's wrapper cost on a 60 us call.
+  - At hidden 4096 the same gap between timed and profiled time is 0.05 ms
+    for Triton and about 0.31 ms for both eager paths; the profiles are single
+    calls, so these differences are indicative only.

@@ -1,8 +1,8 @@
 # fused-llm-kernels
 
 An FP32 SGEMM optimization ladder for Ada (sm_89), from a naive kernel to warp
-tiling and double buffering, a fused GEMM + bias + SiLU epilogue, with fused
-Triton operators planned. Every step up the ladder is backed by
+tiling and double buffering, a fused GEMM + bias + SiLU epilogue, and fused
+Triton operators. Every step up the ladder is backed by
 Nsight Compute data rather than by an explanation of what should have happened.
 
 The technical route itself is well-trodden. What this repository tries to get
@@ -19,7 +19,9 @@ right is the engineering around it:
 > **Status: in progress.** The K1-K8 GEMM ladder is implemented, measured and
 > profiled; K7 reaches 88.0% of cuBLAS, and K8 (double buffering) is a
 > documented negative result at 0.994x of K7. The fused bias + SiLU epilogue
-> is measured over K = 32..8192. Triton fused operators are next.
+> is measured over K = 32..8192. The first Triton operator, fused bias + SiLU,
+> is measured against eager PyTorch and `torch.compile`; RMSNorm and online
+> softmax are next.
 > Predictions and profiling evidence are documented in `docs/optimization-log.md`.
 
 ## Quick start
@@ -38,7 +40,7 @@ make venv                      # Python env for the Triton work (uv; torch 2.14 
 make check-torch               # torch sees the GPU; cuBLAS, Triton and torch.compile give correct results
 make triton-test               # fused bias+SiLU (Triton) and its baselines against a float64 reference
 make triton-bench              # eager / torch.compile / Triton timings -> results/<device>/triton_bias_silu.csv
-make triton-profile IMPL=eager # ncu report for one implementation
+make triton-profile IMPL=eager # ncu report for one implementation (TSHAPE=4096x1024 for another shape)
 ```
 
 `DEVICE` (default `rtx4060-laptop`) names the directory results are written to;
@@ -140,6 +142,28 @@ byte count but a lower bandwidth (100-200 GB/s), and modelled the curve as
 itself has a fixed cost at small K. The optimization log has the full
 comparison. Both kernels compile to 71 registers per thread at K7's geometry
 (K7: 64), so both keep three blocks per SM; the comparison is like for like.
+
+### Triton: fused bias + SiLU
+
+![Effective bandwidth of four implementations of SiLU(x + bias)](docs/img/triton_bias_silu.png)
+
+`SiLU(x + bias)` does almost no arithmetic per element, so its cost is the
+bytes it moves. Fused - one Triton program per row, or `torch.compile` - it
+loads x and stores the result, 8 bytes per element, and both run at the
+measured bandwidth roof for hidden 2048-8192 (197-207 GB/s effective against
+200.6). Eager `silu(x + b)` makes an intermediate and runs two kernels:
+1.85-2.01x the fused time. Written as `t = x + b; t * sigmoid(t)` it runs
+three kernels and moves 28 bytes per element: 3.26-3.46x
+(`results/rtx4060-laptop/triton_bias_silu.csv`, rows = 4096). Each profiled
+kernel of every implementation moves 217-240 GB/s at 4096 x 4096, so the
+ratios are the ratios of bytes.
+
+At hidden 1024 the ratios grow to 3.7x and 6.6x, and the prediction missed
+there: every kernel runs about twice as fast per element at that size, while
+the eager paths carry host-side time beyond their kernels that does not
+shrink with them. `torch.compile` is within 5% of the handwritten kernel from
+hidden 2048 up and 26% slower at 1024, where its wrapper is a visible part of
+a 76 us call. The optimization log has the profiles.
 
 ### Roofline
 

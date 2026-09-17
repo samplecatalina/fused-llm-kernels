@@ -14,8 +14,8 @@ Concretely:
 2. One fused epilogue on the GEMM - `D = SiLU(alpha*A*B + bias)` - measured
    against the same GEMM followed by a separate element-wise pass, over the
    inner dimension K.
-3. Fused Triton operators - RMSNorm and online softmax - compared against both
-   PyTorch eager and `torch.compile`.
+3. Fused Triton operators - bias + SiLU, RMSNorm and online softmax -
+   compared against both PyTorch eager and `torch.compile`.
 4. Stretch: a simplified fused attention forward pass.
 
 **Non-goals**, stated explicitly to bound the scope:
@@ -184,6 +184,22 @@ cross near `K = P*T_fixed/(2MN)`, but the measured curve is smooth.
 K = 4096 and K = 64 for both paths.
 
 ## 6. Triton operators
+
+**Harness.** `triton_kernels/bench.py` follows the rules of the C++ runner:
+float64 reference check (same two tolerances), time-based warmup until the
+SM clock settles, per-iteration CUDA-event timing, clock and power state per
+row, refusal of rows from uncommitted code. Result allocation is inside the
+timed region for every implementation; `torch.compile` is compiled before
+warmup. Each implementation runs in an early and a late slot of every shape.
+Besides time ratios, every row carries an effective bandwidth - the fused
+operator's minimum traffic over the median time - and its share of the
+measured bandwidth roof. `make triton-profile` collects ncu for the
+handwritten Triton kernel, inductor's kernel or PyTorch's eager kernels.
+
+**Fused bias + SiLU (measured).** One program per row, masked power-of-two
+block, bias indexed by column. Compared against eager `silu(x + b)`, eager
+`t = x + b; t * sigmoid(t)` and `torch.compile`, for `rows = 4096`,
+`hidden ∈ {1024, 2048, 4096, 8192}`. `num_warps = 4` from a bounded search.
 
 **RMSNorm forward.** One program per row, `y = x * rsqrt(mean(x²) + ε) * w`,
 with `BLOCK_SIZE = next_pow2(hidden)` and masking. Benchmarked over

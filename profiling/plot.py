@@ -178,6 +178,56 @@ def plot_epilogue(rows, out):
     return speedups
 
 
+TRITON_IMPLS = [("triton", "Triton, fused (1 launch)"),
+                ("compile", "torch.compile (1 launch)"),
+                ("eager", "eager silu(x + b) (2 launches)"),
+                ("eager_composite", "eager x + b, sigmoid, mul (3 launches)")]
+
+
+def plot_triton(rows, roof_gbs, out):
+    """Effective bandwidth (8 bytes per element over the median time) per
+    implementation against hidden, each point the mean of two slots."""
+    by = {}
+    for r in rows:
+        if r["tag"] != "triton-final":
+            continue
+        by.setdefault(r["impl"], {}).setdefault(int(r["hidden"]), []).append(
+            float(r["eff_bandwidth_gbs"]))
+    fig, ax = plt.subplots(figsize=(8, 4.6), facecolor=SURFACE)
+    style(ax)
+    colors = SERIES + [TEXT2]
+    means = {}
+    for (impl, label), color in zip(TRITON_IMPLS, colors):
+        pts = sorted((h, sum(v) / len(v)) for h, v in by.get(impl, {}).items())
+        if not pts:
+            continue
+        means[impl] = dict(pts)
+        xs, ys = zip(*pts)
+        ax.plot(xs, ys, color=color, linewidth=2, marker="o", markersize=5,
+                markeredgecolor=SURFACE, markeredgewidth=1.5, label=label, zorder=3)
+    ax.axhline(roof_gbs, color=REF, linewidth=1, zorder=1)
+    ax.text(8192, roof_gbs * 1.04, f"bandwidth roof {roof_gbs:.0f} GB/s",
+            fontsize=7, color=TEXT2, ha="right")
+    ax.set_xscale("log", base=2)
+    ax.set_xticks([1024, 2048, 4096, 8192])
+    ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{int(v)}"))
+    ax.xaxis.set_minor_formatter(NullFormatter())
+    ax.set_yscale("log")
+    ax.set_yticks([50, 100, 200, 400, 600])
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:,.0f}"))
+    ax.yaxis.set_minor_formatter(NullFormatter())
+    ax.set_xlabel("hidden (rows = 4096)", fontsize=8, color=TEXT2)
+    ax.set_ylabel("effective bandwidth, GB/s (8 bytes per element)", fontsize=8,
+                  color=TEXT2)
+    ax.set_title("SiLU(x + bias): fused kernels move the minimum traffic at the roof",
+                 loc="left", fontsize=11, color=TEXT)
+    ax.legend(frameon=False, fontsize=8, labelcolor=TEXT2, loc="upper right")
+    fig.tight_layout()
+    fig.savefig(out, dpi=150, facecolor=SURFACE)
+    plt.close(fig)
+    return means
+
+
 def headline_report(reports, kernel, shape="4096x4096x4096"):
     """Latest exported ncu report for a kernel at the headline shape.
 
@@ -300,6 +350,12 @@ def main():
                                  img / "epilogue.png")
         for k, v in speedups.items():
             print(f"epilogue K={k}: {v:.3f}x")
+    if (results / "triton_bias_silu.csv").exists() and (results / "roofline.csv").exists():
+        roof = {r["bench"]: r for r in read(results / "roofline.csv")}
+        means = plot_triton(read(results / "triton_bias_silu.csv"),
+                            float(roof["copy_f4"]["gb_per_s"]), img / "triton_bias_silu.png")
+        for impl, pts in means.items():
+            print(f"triton {impl}: " + ", ".join(f"{h}: {g:.1f}" for h, g in pts.items()))
     if (results / "roofline.csv").exists():
         b, c, r, rungs = plot_roofline(results, reports, img / "roofline.png")
         print(f"roofline: bandwidth {b:.1f} GB/s, compute {c:.1f} GFLOP/s, ridge {r:.1f} FLOP/byte")
