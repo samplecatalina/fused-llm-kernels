@@ -39,7 +39,7 @@ make epilogue                  # fused-epilogue sweep over K -> results/<device>
 make venv                      # Python env for the Triton work (uv; torch 2.14 cu132, triton 3.8)
 make check-torch               # torch sees the GPU; cuBLAS, Triton and torch.compile give correct results
 make triton-test               # fused bias+SiLU (Triton) and its baselines against a float64 reference;
-                               # TRITON_OP=rmsnorm for RMSNorm (also for the two targets below)
+                               # TRITON_OP=rmsnorm or softmax for the other operators (also below)
 make triton-bench              # eager / torch.compile / Triton timings -> results/<device>/triton_bias_silu.csv
 make triton-profile IMPL=eager # ncu report for one implementation (TSHAPE=4096x1024 for another shape)
 ```
