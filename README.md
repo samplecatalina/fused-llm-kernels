@@ -255,6 +255,11 @@ is evidence for boundary handling, not a proof for every possible input.
 
 - CUDA events, timed per iteration; **median with p10/p90**, never a mean.
   Dividing a total by a count hides clock drift; the distribution does not.
+  This measures the latency of one call, launch included. For calls short
+  enough that the launch matters - tens of microseconds - the Python
+  harness also has `--timing pipeline`, which submits the repetitions back to
+  back and synchronises once, the regime a model runs in. The two agree for
+  calls above about 300 us; where they do not, the optimization log says so.
 - **Warmup is measured in time, not iterations.** The GPU is kept loaded for at
   least 30 s and then until its SM clock stops trending: the mean over the last
   five one-second samples must be within 1% of the mean over the five before

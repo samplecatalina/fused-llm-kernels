@@ -796,3 +796,46 @@ bytes loaded plus bytes stored, the same accounting the profiler uses.
   - Eager is 3.61-3.74x slower at 4096 and 8192, against a byte ratio of
     about (4 + 7 + 7 + 4 + 7) / 7 = 4.1; its reductions are cheaper than a
     full load-and-store pass.
+
+## Timing regimes: one call at a time, or a stream of calls
+
+- **Why**: at hidden 1024 all three operators showed differences that the
+  kernel profiles did not explain - `torch.softmax` 0.69x of the Triton call,
+  `torch.compile` 2.2x - while the kernels themselves took the same time. The
+  question is what the harness measures when a call is short.
+- **What the two regimes are**: the harness times each call with CUDA events
+  and synchronises after every one, so a call's launch is not overlapped with
+  anything: that is the latency of one call. A model submits calls back to
+  back, and the host-side launch of one overlaps the kernel of the last:
+  that is the throughput of a stream. `--timing pipeline` measures the second
+  (one synchronise for the whole run, mean per call) and also records the
+  host-side submission cost alone.
+- **Host-side submission** (no synchronisation at all, per call): PyTorch's
+  native kernels 8-20 us, the handwritten Triton wrappers 17-36 us,
+  `torch.compile` 28-34 us, the multi-kernel eager forms 15-49 us. A Triton
+  kernel is launched from Python; a native kernel from C++.
+- **Measured** (`triton_<op>_pipeline.csv`, tag `pipeline`, same shapes and
+  slots as the per-call runs):
+
+  | operator, hidden 1024 | per-call ratio to Triton | pipeline ratio to Triton |
+  |---|---|---|
+  | `torch.softmax` | **0.69** | **1.07** |
+  | `torch.nn.RMSNorm` | 1.25 | 1.85 |
+  | `torch.compile` (softmax) | 2.26 | 1.94 |
+  | eager (softmax, 5 kernels) | 5.75 | 8.72 |
+
+  At hidden 2048 and above the two regimes agree for RMSNorm and softmax
+  (0.90-1.05) and the ratios between implementations are unchanged.
+- **Reading**: the one cell where a PyTorch kernel beat the handwritten one
+  was a property of the measurement, not of the kernels. Timed one call at a
+  time, a 40 us call carries its own launch; PyTorch launches from C++ in
+  about 8 us and Triton from Python in about 18 us, and that difference is
+  most of the 18 us gap. Submitted back to back, where a model would keep the
+  queue full, the handwritten kernel is 0.93x of `torch.softmax` instead.
+  Neither regime is wrong; the per-call numbers elsewhere in this log are
+  latencies, and for calls above about 300 us the two agree.
+- **One difference is unexplained**: for bias + SiLU at hidden 2048-4096 the
+  pipelined stream costs 10-25% more per call than isolated calls
+  (per-call/pipeline 0.78-0.84), while RMSNorm and softmax agree within 10%.
+  It is not the output allocation (preallocating the result changes nothing)
+  and not the clock (2520 MHz in both, same temperature). Left open.
