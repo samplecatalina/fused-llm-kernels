@@ -112,6 +112,19 @@ of 64, which lowers the resident blocks per SM from four to three, and used
 nonzero initial C, alpha/beta, empty reductions and tile boundaries for every
 K8 entry.
 
+### Size sweep
+
+![Throughput against size for cuBLAS, K2 and K7](docs/img/sweep.png)
+
+K2, which reads A and B straight from global memory, loses 12% between 2880
+and 3072 and never recovers, and the profile shows why: its L2 hit rate halves
+(90% to 46%) and DRAM's share of its traffic quintuples. The step sits where a
+single 32 MiB matrix no longer fits in L2 (N = 2896), not where A and B
+together stop fitting (N = 2048) - the location that had been predicted
+before the sweep. cuBLAS and K7 move data in tiles and show no step. Details,
+including the predictions and the extra sizes that located the step, are in
+the optimization log.
+
 ## Fused operators
 
 Each of these is bound by the bytes it moves, so the gain from fusing is the
@@ -131,19 +144,6 @@ The fused kernels reach the roof whatever their register count or occupancy -
 operators, at the same time - and handwritten Triton ties the fused kernels
 PyTorch already ships rather than beating them. What it beats is the
 multi-kernel eager form, by close to the ratio of bytes moved.
-
-### Size sweep
-
-![Throughput against size for cuBLAS, K2 and K7](docs/img/sweep.png)
-
-K2, which reads A and B straight from global memory, loses 12% between 2880
-and 3072 and never recovers, and the profile shows why: its L2 hit rate halves
-(90% to 46%) and DRAM's share of its traffic quintuples. The step sits where a
-single 32 MiB matrix no longer fits in L2 (N = 2896), not where A and B
-together stop fitting (N = 2048) - the location that had been predicted
-before the sweep. cuBLAS and K7 move data in tiles and show no step. Details,
-including the predictions and the extra sizes that located the step, are in
-the optimization log.
 
 ### Fused epilogue: GEMM + bias + SiLU
 
@@ -235,7 +235,7 @@ their register count or occupancy, the eager forms pay close to the byte
 ratio of their extra passes, and handwritten Triton ties, but does not
 beat, the fused kernels PyTorch already ships.
 
-### Roofline
+## Roofline
 
 ![Measured roofline with every rung placed on it](docs/img/roofline.png)
 
