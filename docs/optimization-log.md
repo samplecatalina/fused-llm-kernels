@@ -418,6 +418,7 @@ bytes loaded plus bytes stored, the same accounting the profiler uses.
   | `triad_f4` | 34.4 GFLOP/s at 206.3 GB/s, exactly 1/6 of its traffic | on the slanted roof - held |
   | ridge | **63.0 FLOP/byte** | about 60 - held |
   | `copy_f1` | 213.0 GB/s, 6% *faster* than float4 | half or less - wrong |
+  | `gemm_f16` (added later, for the attention kernel) | **30.2 TFLOP/s** cuBLAS FP16 with FP32 accumulation at 8192^3 | not predicted |
   | `fma_f1` | 11.24 TFLOP/s, 0.89 of float4 | half to a third - wrong |
 
 - **What the two misses say**: for sequential access, one float per
@@ -913,8 +914,9 @@ bytes loaded plus bytes stored, the same accounting the profiler uses.
   and each new block rescales what is already accumulated. Unlike the
   operators above, this one is compute-bound and uses tensor cores through
   `tl.dot`, so the reference ceiling is FP16, not the project's FP32 roof:
-  `torch.matmul` in FP16 with FP32 accumulation reaches **29.8 TFLOP/s**
-  measured on this part (12.63 TFLOP/s is the FP32 figure).
+  cuBLAS FP16 with FP32 accumulation reaches **30.2 TFLOP/s** measured on this
+  part by the `gemm_f16` benchmark of the roofline program (12.63 TFLOP/s is
+  the FP32 figure).
 - **Implementation**: forward only, causal, FP16 in with FP32 accumulation,
   head_dim 64 or 128, one program per 64 queries walking 64 keys at a time
   (a bounded search over 64x32, 64x64, 128x64 and 128x128 at seq 2048 chose
@@ -936,12 +938,12 @@ bytes loaded plus bytes stored, the same accounting the profiler uses.
   because the official kernel is far more tuned; math/Triton 3.5-5.
 - **Measured** (`triton_attention.csv`, tag `triton-final`, batch 1, 16 heads):
 
-  | seq | head_dim | Triton ms | TFLOP/s (% of 29.8) | flash / Triton | math / Triton |
+  | seq | head_dim | Triton ms | TFLOP/s (% of 30.2) | flash / Triton | math / Triton |
   |---|---|---|---|---|---|
-  | 1024 | 64 | 0.145 | 14.8 (50%) | **1.05** | 28.7 |
+  | 1024 | 64 | 0.145 | 14.8 (49%) | **1.05** | 28.7 |
   | 2048 | 64 | 0.398 | 21.6 (72%) | **1.03** | 42.9 |
-  | 4096 | 64 | 1.360 | 25.3 (85%) | **1.02** | 50.6 |
-  | 2048 | 128 | 1.000 | 17.2 (58%) | 0.71 | 18.9 |
+  | 4096 | 64 | 1.360 | 25.3 (84%) | **1.02** | 50.6 |
+  | 2048 | 128 | 1.000 | 17.2 (57%) | 0.71 | 18.9 |
 
   ![Attention throughput against sequence length](img/attention.png)
 
@@ -963,6 +965,6 @@ bytes loaded plus bytes stored, the same accounting the profiler uses.
     It does more than that: it upcasts to FP32 and runs `ampere_sgemm` instead
     of tensor cores, builds and applies the causal mask in separate passes,
     and converts back. The materialisation is only part of the cost.
-  - Throughput rises with sequence length (50% of the FP16 ceiling at 1024,
-    85% at 4096): the causal loop's work grows as seq^2 while the fixed costs
+  - Throughput rises with sequence length (49% of the FP16 ceiling at 1024,
+    84% at 4096): the causal loop's work grows as seq^2 while the fixed costs
     do not.

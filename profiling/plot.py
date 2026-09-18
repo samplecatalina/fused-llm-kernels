@@ -246,7 +246,7 @@ def plot_triton(rows, roof_gbs, out, op):
     return means
 
 
-ATTENTION_FP16_ROOF = 29.84  # TFLOP/s, torch.matmul FP16 at 8192^3 (worklog)
+ATTENTION_FP16_ROOF = 30.21  # TFLOP/s, gemm_f16 row of roofline.csv
 
 
 def plot_attention(rows, out):
@@ -271,7 +271,7 @@ def plot_attention(rows, out):
                 markeredgecolor=SURFACE, markeredgewidth=1.5, label=label, zorder=3)
     ax.axhline(ATTENTION_FP16_ROOF, color=REF, linewidth=1, zorder=1)
     ax.text(4096, ATTENTION_FP16_ROOF * 0.93,
-            f"FP16 matmul, measured: {ATTENTION_FP16_ROOF:.0f} TFLOP/s",
+            f"FP16 matmul, measured: {ATTENTION_FP16_ROOF:.1f} TFLOP/s",
             fontsize=7, color=TEXT2, ha="right", va="top")
     ax.set_xscale("log", base=2)
     ax.set_yscale("log")

@@ -236,4 +236,5 @@ kernel. Acceptance is therefore the Frobenius error against the FP32 reference
 backend, which produces output within one FP16 ulp of this kernel.
 
 Being compute-bound, this kernel is reported against a measured FP16 matmul
-ceiling (29.8 TFLOP/s) rather than the FP32 roof.
+ceiling - the `gemm_f16` benchmark of the roofline program, cuBLAS FP16 with
+FP32 accumulation at 8192^3, 30.2 TFLOP/s - rather than the FP32 roof.

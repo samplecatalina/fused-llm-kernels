@@ -50,11 +50,11 @@ make triton-profile IMPL=eager # ncu report for one implementation (TSHAPE=4096x
 `scripts/install_cuda_wsl.sh` installs the CUDA toolkit inside WSL2 if needed.
 
 Reproducing the published numbers: `make test` and the operator test targets
-pass from a clean checkout, and `make bench` reproduces the ladder within
-about 1% when the part is cooled (a rerun of K0/K7/K8 gave 9102.0, 8049.3 and
-7946.2 GFLOP/s against the published 9115.1, 8041.9 and 7845.6 - K8's
-published figure is the mean of an early and a late slot, and a single-slot
-rerun sits above it).
+pass from a clean checkout, and a cooled rerun of K0/K7/K8 in the same
+`K0, K7, K8, K8, K7` order is within 2% of the published ladder - 8994.0 for
+cuBLAS (inside its band), 7912.3 for K7 (-1.6%) and 7855.4 for K8 (+0.1%),
+with the same-run K8/K7 ratio at 0.993 against the published 0.994. Those
+rows carry the tag `repro-v1.0` in `results/rtx4060-laptop/gemm_4096.csv`.
 The Python environment is pinned in `requirements-lock.txt`. The torch wheel
 is built for sm_86 and newer major architectures but not for sm_89
 specifically; it runs on this part through same-major compatibility, which
@@ -83,7 +83,9 @@ The baseline itself was measured four times (rows 2, 8, 9, 10): 9115.1,
 range, falling monotonically as the part heats from 75 to 82 C and its settled
 clock drops from 2415 to 2346 MHz. Percentages above carry that uncertainty.
 An earlier baseline taken with the host power configuration set wrong came out
-26.2% lower, which is why the enforced power limit is recorded in every row.
+at 7151.8 GFLOP/s - 20.8% under this median, or equivalently the corrected
+setting is 26.2% above it - which is why the enforced power limit is recorded
+in every row.
 
 K6 and K7 are medians of three runs after a cooldown, each run measuring K0,
 K6 and K7 together (0.43% and 0.57% ranges); K6's ratio to K5 spans two runs
@@ -253,8 +255,9 @@ recurrence is what "online softmax" is for, and unlike the row-wise softmax
 above, here it is necessary: a row of scores is produced a block at a time.
 
 This kernel is compute-bound and uses tensor cores, so its ceiling is the
-measured FP16 matmul throughput, 29.8 TFLOP/s, not the FP32 roof. It reaches
-**25.3 TFLOP/s at seq 4096** (85% of that), **ties PyTorch's flash backend**
+measured FP16 matmul throughput, 30.2 TFLOP/s (the `gemm_f16` row of
+`roofline.csv`), not the FP32 roof. It reaches **25.3 TFLOP/s at seq 4096**
+(84% of that), **ties PyTorch's flash backend**
 at head_dim 64 (1.02-1.05x) and is 19-51x faster than the math backend. At
 head_dim 128 the flash backend is 1.4x ahead. The math backend's cost is not
 only the materialisation: it upcasts to FP32 and runs `ampere_sgemm` rather
