@@ -334,11 +334,12 @@ def plot_roofline(results, reports, out):
              and r.get("baseline_check") != "out-of-band"]
     rungs = []
     for k in ["k1", "k2", "k3", "k4", "k5", "k6", "k7", "k8"]:
-        # Keep the original published K1-K7 runs; later K7 controls belong
-        # to the K8 experiment. K8 uses only its final runs.
+        # Keep the original published K1-K7 runs, which carry no tag: later
+        # runs of the same kernel are controls for another experiment (the K8
+        # comparison) or reproduction checks, and must not move a published
+        # point. K8 uses its own final runs.
         selected = [r for r in clean if r["kernel"] == k
-                    and (r["tag"] == "k8-final" if k == "k8"
-                         else not r["tag"].startswith("k8"))]
+                    and (r["tag"] == "k8-final" if k == "k8" else r["tag"] == "")]
         vals = [float(r["gflops_median"]) for r in selected]
         if k == "k8":
             # Each final run measures K8 in an early and a late slot; a run's
