@@ -1,4 +1,4 @@
-# fused-llm-kernels
+# LLM Kernel Operator Fusion & Optimization
 
 An FP32 SGEMM optimization ladder for Ada (sm_89), from a naive kernel to warp
 tiling and double buffering, a fused GEMM + bias + SiLU epilogue, and fused
