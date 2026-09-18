@@ -16,7 +16,7 @@ right is the engineering around it:
   and clock, power and clock-event state recorded with every result row.
 - **A roofline built from micro-benchmarks**, not from datasheet numbers.
 
-> **Status: in progress.** The K1-K8 GEMM ladder is implemented, measured and
+> **Status: completed.** The K1-K8 GEMM ladder is implemented, measured and
 > profiled; K7 reaches 88.0% of cuBLAS, and K8 (double buffering) is a
 > documented negative result at 0.994x of K7. The fused bias + SiLU epilogue
 > is measured over K = 32..8192. Three Triton operators - fused bias + SiLU,
