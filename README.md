@@ -139,6 +139,7 @@ on the same part, through harnesses that follow the same rules
 | RMSNorm forward (Triton) | eager 6-kernel form | **2.95-3.48x** | 201-212 GB/s; ties `torch.nn.RMSNorm` (0.95-1.01x) |
 | Row-wise softmax (Triton) | eager 5-kernel form | **3.27-3.74x** | 194-207 GB/s; ties `torch.softmax` (0.91-0.98x) |
 | RMSNorm backward (Triton) | PyTorch's fused backward / eager autograd | **1.51-1.69x** / **6.0-7.8x** | one pass for both gradients (12 bytes per element) against two |
+| Causal attention forward (Triton) | SDPA math backend | **19-51x** | ties the flash backend at head_dim 64 (1.02-1.05x), 25.3 TFLOP/s at seq 4096 |
 
 The fused kernels reach the roof whatever their register count or occupancy -
 30 to 204 registers per thread and 16% to 94% occupancy across these
@@ -239,6 +240,26 @@ the fused versions move the minimum traffic at the measured roof whatever
 their register count or occupancy, the eager forms pay close to the byte
 ratio of their extra passes, and handwritten Triton ties, but does not
 beat, the fused kernels PyTorch already ships.
+
+### Triton: fused causal attention (stretch)
+
+![Attention throughput against sequence length](docs/img/attention.png)
+
+Written out, attention materialises a seq x seq score matrix per head - 537 MB
+at seq 4096 with 16 heads - and passes over it several times. Tiled, the
+scores stay on chip: one program owns 64 queries, walks the key blocks it may
+see, and rescales its running normalizer as each block arrives. That
+recurrence is what "online softmax" is for, and unlike the row-wise softmax
+above, here it is necessary: a row of scores is produced a block at a time.
+
+This kernel is compute-bound and uses tensor cores, so its ceiling is the
+measured FP16 matmul throughput, 29.8 TFLOP/s, not the FP32 roof. It reaches
+**25.3 TFLOP/s at seq 4096** (85% of that), **ties PyTorch's flash backend**
+at head_dim 64 (1.02-1.05x) and is 19-51x faster than the math backend. At
+head_dim 128 the flash backend is 1.4x ahead. The math backend's cost is not
+only the materialisation: it upcasts to FP32 and runs `ampere_sgemm` rather
+than tensor cores, and applies the causal mask in separate passes - 17 kernels
+per call.
 
 ## Roofline
 

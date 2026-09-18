@@ -246,6 +246,53 @@ def plot_triton(rows, roof_gbs, out, op):
     return means
 
 
+ATTENTION_FP16_ROOF = 29.84  # TFLOP/s, torch.matmul FP16 at 8192^3 (worklog)
+
+
+def plot_attention(rows, out):
+    """TFLOP/s per implementation against sequence length, head_dim 64."""
+    by = {}
+    for r in rows:
+        if r["tag"] != "triton-final" or int(r["hidden"]) != 64:
+            continue
+        by.setdefault(r["impl"], {}).setdefault(int(r["rows"]), []).append(
+            float(r["tflops"]))
+    labels = [("triton", "Triton, fused (1 kernel)"),
+              ("sdpa_flash", "SDPA flash backend (1 kernel)"),
+              ("sdpa_math", "SDPA math backend (17 kernels, FP32 matmuls)")]
+    fig, ax = plt.subplots(figsize=(8, 4.4), facecolor=SURFACE)
+    style(ax)
+    for (impl, label), color in zip(labels, SERIES):
+        pts = sorted((s, sum(v) / len(v)) for s, v in by.get(impl, {}).items())
+        if not pts:
+            continue
+        xs, ys = zip(*pts)
+        ax.plot(xs, ys, color=color, linewidth=2, marker="o", markersize=5,
+                markeredgecolor=SURFACE, markeredgewidth=1.5, label=label, zorder=3)
+    ax.axhline(ATTENTION_FP16_ROOF, color=REF, linewidth=1, zorder=1)
+    ax.text(4096, ATTENTION_FP16_ROOF * 0.93,
+            f"FP16 matmul, measured: {ATTENTION_FP16_ROOF:.0f} TFLOP/s",
+            fontsize=7, color=TEXT2, ha="right", va="top")
+    ax.set_xscale("log", base=2)
+    ax.set_yscale("log")
+    ax.set_xticks([1024, 2048, 4096])
+    ax.set_yticks([0.5, 1, 2, 5, 10, 20, 30])
+    ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{int(v)}"))
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g}"))
+    ax.xaxis.set_minor_formatter(NullFormatter())
+    ax.yaxis.set_minor_formatter(NullFormatter())
+    ax.set_xlabel("sequence length (batch 1, 16 heads, head_dim 64, causal)",
+                  fontsize=8, color=TEXT2)
+    ax.set_ylabel("TFLOP/s", fontsize=8, color=TEXT2)
+    ax.set_title("Causal attention forward: fused kernels against the math backend",
+                 loc="left", fontsize=11, color=TEXT)
+    ax.legend(frameon=False, fontsize=8, labelcolor=TEXT2, loc="center left")
+    fig.tight_layout()
+    fig.savefig(out, dpi=150, facecolor=SURFACE)
+    plt.close(fig)
+    return by
+
+
 def headline_report(reports, kernel, shape="4096x4096x4096"):
     """Latest exported ncu report for a kernel at the headline shape.
 
@@ -368,6 +415,9 @@ def main():
                                  img / "epilogue.png")
         for k, v in speedups.items():
             print(f"epilogue K={k}: {v:.3f}x")
+    if (results / "triton_attention.csv").exists():
+        plot_attention(read(results / "triton_attention.csv"), img / "attention.png")
+        print("attention figure written")
     for op in TRITON_PLOTS:
         if not (results / f"triton_{op}.csv").exists() or not (results / "roofline.csv").exists():
             continue

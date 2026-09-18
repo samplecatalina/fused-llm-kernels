@@ -219,10 +219,21 @@ eager form (five launches, about four times the traffic of one pass),
 2049) and `torch.compile`, reported both as time ratios and as effective
 bandwidth against the measured roof. `num_warps = 4` from a bounded search.
 
-## 7. Simplified fused attention (stretch)
+## 7. Fused causal attention (measured)
 
-Scope fixed up front: forward only, causal, no dropout, `head_dim ∈ {64, 128}`,
-FP16 inputs with FP32 accumulation. Triton implementation, compared against the
-math and flash backends of `scaled_dot_product_attention`, with the tolerance
-relaxed to 2e-2. With 8 GB of memory on this part, the maximum sequence length
-has to be determined empirically.
+Scope as fixed up front: forward only, causal, no dropout,
+`head_dim ∈ {64, 128}`, FP16 inputs with FP32 accumulation, compared against
+the math and flash backends of `scaled_dot_product_attention`. One program per
+block of 64 queries walks the key blocks it may see, keeping a running maximum
+and normalizer; the score matrix never reaches memory. Tile sizes come from a
+bounded search at seq 2048.
+
+The tolerance was fixed at 2e-2 before measuring and did not survive it: the
+FP16 rounding of a single output against an FP32 reference is 2.4e-2 at seq
+1024 and 6.2e-2 at seq 4096, for PyTorch's flash backend as much as for this
+kernel. Acceptance is therefore the Frobenius error against the FP32 reference
+(2e-3, measured 2.4e-4) plus an element-wise comparison against the flash
+backend, which produces output within one FP16 ulp of this kernel.
+
+Being compute-bound, this kernel is reported against a measured FP16 matmul
+ceiling (29.8 TFLOP/s) rather than the FP32 roof.

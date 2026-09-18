@@ -900,3 +900,69 @@ bytes loaded plus bytes stored, the same accounting the profiler uses.
     still at the bandwidth roof. Across the operators here the same point
     keeps returning: while a kernel is bound by the bytes it moves,
     occupancy is not the constraint.
+
+## Triton - fused causal attention (stretch)
+
+- **Hypothesis**: `O = softmax(QKt/sqrt(D) + causal mask) V` written out
+  materialises a seq x seq score matrix per (batch, head) - 537 MB at
+  seq 4096 with 16 heads in FP16 - and writes and reads it several times.
+  Tiled, the scores stay on chip: one program owns a block of queries, walks
+  the key blocks it may see, and keeps a running maximum and normalizer, so
+  global traffic is Q, K, V and O only. This is where the online-softmax
+  recurrence earns its place: a row of scores is produced a block at a time,
+  and each new block rescales what is already accumulated. Unlike the
+  operators above, this one is compute-bound and uses tensor cores through
+  `tl.dot`, so the reference ceiling is FP16, not the project's FP32 roof:
+  `torch.matmul` in FP16 with FP32 accumulation reaches **29.8 TFLOP/s**
+  measured on this part (12.63 TFLOP/s is the FP32 figure).
+- **Implementation**: forward only, causal, FP16 in with FP32 accumulation,
+  head_dim 64 or 128, one program per 64 queries walking 64 keys at a time
+  (a bounded search over 64x32, 64x64, 128x64 and 128x128 at seq 2048 chose
+  64x64: 0.397, 0.396, 0.514, 0.518 ms). The causal loop counts key blocks by
+  position rather than by query block - counting them by query block visits
+  half the keys whenever the two tile sizes differ, which the tile variants
+  in the tests caught.
+- **Correctness**: against an FP32 reference, the Frobenius error is 2.4e-4
+  (bound 2e-3). Element-wise, the FP16 rounding of a single output against an
+  FP32 reference is already 2.4e-2 at seq 1024 and 6.2e-2 at seq 4096 - for
+  PyTorch's flash backend as well, which produces bit-comparable output
+  (within one FP16 ulp of this kernel) - so the element-wise check is against
+  the flash backend rather than against a fixed bound. 50 checks also cover
+  causal structure (changing keys after row i leaves row i untouched) and the
+  tile variants.
+- **Prediction** (committed first): Triton 0.105 / 0.40 / 1.58 ms at seq
+  1024 / 2048 / 4096 (head_dim 64) and 0.79 ms at seq 2048 head_dim 128;
+  21-22 TFLOP/s, about 72% of the FP16 ceiling; flash/Triton 0.55 (0.4-0.8),
+  because the official kernel is far more tuned; math/Triton 3.5-5.
+- **Measured** (`triton_attention.csv`, tag `triton-final`, batch 1, 16 heads):
+
+  | seq | head_dim | Triton ms | TFLOP/s (% of 29.8) | flash / Triton | math / Triton |
+  |---|---|---|---|---|---|
+  | 1024 | 64 | 0.145 | 14.8 (50%) | **1.05** | 28.7 |
+  | 2048 | 64 | 0.398 | 21.6 (72%) | **1.03** | 42.9 |
+  | 4096 | 64 | 1.360 | 25.3 (85%) | **1.02** | 50.6 |
+  | 2048 | 128 | 1.000 | 17.2 (58%) | 0.71 | 18.9 |
+
+  ![Attention throughput against sequence length](img/attention.png)
+
+- **Evidence** (`triton_attention_<impl>_{2048,4096}x64_20260917_17*`): the
+  handwritten kernel is one launch (150 registers per thread, 24% occupancy,
+  39-43% compute throughput); so is the flash backend (16% occupancy, the
+  same compute throughput). The math backend runs **17 kernels per call**:
+  three element-wise passes over the score matrix totalling 7.5 ms, two
+  `ampere_sgemm` calls (2.8 and 1.5 ms), an FP32 `softmax_warp_forward`
+  (2.6 ms), FP16 copies (1.8 ms) and an `isneginf` pass (1.6 ms) at seq 2048.
+- **Difference**: two predictions were wrong, in opposite directions.
+  - *Against flash*: predicted 0.55, measured 1.02-1.05 at head_dim 64 - a
+    tie, not a loss. At head_dim 128 the flash backend is ahead (0.71), which
+    is the expected shape of the result; at 64 this part's limit is reached by
+    both. The prediction assumed the official kernel's tuning would show at
+    every size; on a 24-SM laptop part at head_dim 64 it does not.
+  - *Against math*: predicted 3.5-5x, measured 19-51x. The prediction assumed
+    the math backend does the same arithmetic with an extra materialisation.
+    It does more than that: it upcasts to FP32 and runs `ampere_sgemm` instead
+    of tensor cores, builds and applies the causal mask in separate passes,
+    and converts back. The materialisation is only part of the cost.
+  - Throughput rises with sequence length (50% of the FP16 ceiling at 1024,
+    85% at 4096): the causal loop's work grows as seq^2 while the fixed costs
+    do not.
