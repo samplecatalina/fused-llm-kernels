@@ -839,3 +839,64 @@ bytes loaded plus bytes stored, the same accounting the profiler uses.
   (per-call/pipeline 0.78-0.84), while RMSNorm and softmax agree within 10%.
   It is not the output allocation (preallocating the result changes nothing)
   and not the clock (2520 MHz in both, same temperature). Left open.
+
+## Triton - RMSNorm backward
+
+- **Hypothesis**: from `y = x * r * w` with `r = rsqrt(mean(x^2) + eps)` and
+  `g = dy * w`, the gradients are
+  `dx_ij = r_i g_ij - (r_i^3 / H) x_ij sum_k x_ik g_ik` (a reduction along
+  the row) and `dw_j = sum_i dy_ij x_ij r_i` (one along the column). Both
+  read dy and x. Splitting them into two kernels reads those twice; one
+  kernel that owns a strip of rows can write their dx and accumulate its own
+  partial dw in the same pass, and a small sum finishes dw. Counting kernels
+  first: eager autograd launches 15, PyTorch's fused backward 2
+  (`layer_norm_grad_input` and `GammaBetaBackward`), `torch.compile` 2. This
+  is the first operator here where the handwritten kernel should win, because
+  it moves 12 bytes per element against about 20.
+- **Implementation**: one program per strip of rows, sized so that the
+  partial-dw matrix stays small (about 192 programs). `r` is recomputed from
+  x rather than saved by the forward pass: one more reduction over values
+  already loaded, against reading a rows-long vector back. `num_warps = 4`
+  from a bounded search (`tuning_triton_rmsnorm_bwd.csv`: 0.985, 0.974,
+  1.004, 0.989 ms for 2, 4, 8, 16). Supported hidden is capped at 32768,
+  where this kernel's compile time is already 3 s and rising steeply.
+- **Correctness**: both gradients against a double-precision host reference
+  on seven shapes and four tile widths, plus the two PyTorch paths on the
+  same inputs (67 checks). At hidden 1 the formula is ill-conditioned - the
+  two terms of dx cancel to about 1e-6 of their size - and no float32
+  implementation is accurate there (PyTorch's own backward: 1.6e-3 to
+  7.2e-2 relative against the double reference, this kernel 2.9e-2); the
+  benchmark shapes exclude it and the test only requires the kernel to be no
+  worse than PyTorch.
+- **Prediction** (committed first): Triton 0.27 / 0.50 / 0.98 / 1.95 ms at
+  hidden 1024 / 2048 / 4096 / 8192; native/Triton 1.4-1.5, compile/Triton
+  1.4-1.5, eager/Triton 6.5-7.0; effective bandwidth above the roof at 1024
+  and 2048 as the forward operators showed.
+- **Measured** (`triton_rmsnorm_bwd.csv`, tag `triton-final`):
+
+  | hidden | Triton ms | Triton GB/s (12 B/elem) | native / Triton | compile / Triton | eager / Triton |
+  |---|---|---|---|---|---|
+  | 1024 | 0.271 | 186 (93%) | 1.51 | 1.63 | 6.02 |
+  | 2048 | 0.536 | 188 (94%) | 1.52 | 1.11 | 7.13 |
+  | 4096 | 0.998 | 202 (101%) | 1.59 | 1.62 | 7.43 |
+  | 8192 | 1.984 | 203 (101%) | 1.69 | 1.59 | 7.75 |
+
+  ![Effective bandwidth of four RMSNorm backward implementations](img/triton_rmsnorm_bwd.png)
+
+- **Evidence** (`triton_rmsnorm_bwd_<impl>_4096x4096_20260917_17*`): the
+  handwritten kernel is a single launch of 880 us at 233 GB/s moving 12.2
+  bytes per element - one pass, as designed. PyTorch's `layer_norm_grad_input`
+  moves 11.4 bytes per element in 803 us and its `GammaBetaBackward` adds
+  another pass; inductor's two kernels move 8.0 and 11.1 bytes per element
+  (545 and 780 us). Eager's 16 kernels take 6.2 ms per call.
+- **Difference**: the throughput, native and eager predictions held; compile
+  was outside the range twice (1.11 at hidden 2048, 1.62 at 4096). The
+  bandwidth prediction failed: at hidden 1024 and 2048 this kernel reaches
+  93-94% of the roof, not the 300-500% the forward operators showed at those
+  widths. Whatever makes a short forward kernel run faster per element does
+  not apply to a kernel that does this much more work per element.
+  - The handwritten kernel holds **204 registers per thread and reaches 16%
+    occupancy** at hidden 4096, and is still the fastest of the four and
+    still at the bandwidth roof. Across the operators here the same point
+    keeps returning: while a kernel is bound by the bytes it moves,
+    occupancy is not the constraint.

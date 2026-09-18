@@ -138,12 +138,17 @@ on the same part, through harnesses that follow the same rules
 | bias + SiLU (Triton) | eager `silu(x + b)` / eager 3-kernel form | **1.85-2.01x** / **3.26-3.46x** (hidden 2048-8192) | 197-207 GB/s effective, at the 200.6 GB/s roof |
 | RMSNorm forward (Triton) | eager 6-kernel form | **2.95-3.48x** | 201-212 GB/s; ties `torch.nn.RMSNorm` (0.95-1.01x) |
 | Row-wise softmax (Triton) | eager 5-kernel form | **3.27-3.74x** | 194-207 GB/s; ties `torch.softmax` (0.91-0.98x) |
+| RMSNorm backward (Triton) | PyTorch's fused backward / eager autograd | **1.51-1.69x** / **6.0-7.8x** | one pass for both gradients (12 bytes per element) against two |
 
 The fused kernels reach the roof whatever their register count or occupancy -
-30 to 60 registers per thread and 63% to 94% occupancy across the three Triton
-operators, at the same time - and handwritten Triton ties the fused kernels
-PyTorch already ships rather than beating them. What it beats is the
-multi-kernel eager form, by close to the ratio of bytes moved.
+30 to 204 registers per thread and 16% to 94% occupancy across these
+operators, at the same throughput - so while a kernel is bound by bytes,
+occupancy is not the constraint. On the three forward operators handwritten
+Triton ties the fused kernels PyTorch already ships rather than beating them;
+what it beats is the multi-kernel eager form, by close to the ratio of bytes
+moved. The backward pass is the exception: PyTorch computes the two gradients
+in two kernels that each read dy and x, and doing both in one pass is 1.5-1.7x
+faster.
 
 ### Fused epilogue: GEMM + bias + SiLU
 
